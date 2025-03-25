@@ -1,23 +1,32 @@
+#!/bin/bash
+
+# 确保脚本在 Compiler-R1 环境中运行
+source /root/anaconda3/etc/profile.d/conda.sh
+conda activate Compiler-R1
+
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export BASE_MODEL='Qwen/Qwen2.5-1.5B-Instruct'
-export PROJECT_NAME='hotpotqa_qwen2.5-1.5b-instruct'
+export PROJECT_NAME='compiler_autotuning_qwen2.5-1.5b-instruct'
 export EXPERIMENT_NAME=grpo
 export HYDRA_FULL_ERROR=1
 export CUDA_LAUNCH_BLOCKING=1
 
+# 确保 Ray 使用 Compiler-R1 环境
+export PYTHONPATH=/root/anaconda3/envs/Compiler-R1/bin:$PYTHONPATH
+
 python3 -m agent_r1.src.main_agent \
     algorithm.adv_estimator=grpo \
-    data.train_files=./data/hotpotqa/train.parquet \
-    data.val_files=./data/hotpotqa/validation.parquet \
-    data.train_batch_size=128 \
-    data.max_prompt_length=4096 \
-    data.max_response_length=4096 \
-    data.max_start_length=4096 \
-    data.max_tool_response_length=4096 \
+    data.train_files=/root/data/compiler_autotuning/train.parquet \
+    data.val_files=/root/data/compiler_autotuning/validation.parquet \
+    data.train_batch_size=32 \
+    data.max_prompt_length=8192 \
+    data.max_response_length=8192 \
+    data.max_start_length=8192 \
+    data.max_tool_response_length=8192 \
     actor_rollout_ref.model.path=$BASE_MODEL \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=64 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=16 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
     actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
@@ -37,9 +46,9 @@ python3 -m agent_r1.src.main_agent \
     trainer.logger=['console','wandb'] \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=10 \
     trainer.total_epochs=1 \
-    tool.env='search' $@
+    tool.env='optimizer' $@
