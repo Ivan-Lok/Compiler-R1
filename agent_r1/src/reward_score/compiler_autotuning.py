@@ -25,6 +25,24 @@ from agent_r1.tool.tools.comiler_autotuning.list_passes_tool import ListPassesTo
 gen_autophase_tool = GenAutophaseTool()
 list_passes_tool = ListPassesTool()
 
+def read_llvm_ir_file(file_path):
+    """
+    Read LLVM IR code from a file
+    
+    Args:
+        file_path: Path to the LLVM IR file
+        
+    Returns:
+        LLVM IR code as string
+    """
+    try:
+        with open(file_path, 'r') as file:
+            return file.read()
+    except Exception as e:
+        print(f"Error reading file {file_path}: {e}")
+        return None
+
+
 def extract_answer(solution_str: str) -> str:
     """Extract the answer from the solution string.
     
@@ -57,8 +75,8 @@ def extract_think_content(assistant_block: str) -> Optional[str]:
         return match.group(1).strip()
     return None
 
-def extract_pass_from_think(think_content: str) -> Optional[List[str]]:
-    """从think内容中提取优化pass。
+def extract_passes_from_think(think_content: str) -> Optional[List[str]]:
+    """从think内容中提取格式化的优化pass列表。
     
     Args:
         think_content: think内容
@@ -66,27 +84,52 @@ def extract_pass_from_think(think_content: str) -> Optional[List[str]]:
     Returns:
         提取的优化pass列表，如果没有找到则返回None
     """
-    # 尝试匹配"--"开头的优化pass
-    pass_patterns = [
-        r'使用(?:优化pass|pass|优化选项)\s*["\']?(-{2}[a-zA-Z0-9-]+)["\']?',
-        r'选择(?:优化pass|pass|优化选项)\s*["\']?(-{2}[a-zA-Z0-9-]+)["\']?',
-        r'应用(?:优化pass|pass|优化选项)\s*["\']?(-{2}[a-zA-Z0-9-]+)["\']?',
-        r'(?:优化pass|pass|优化选项)[：:]\s*["\']?(-{2}[a-zA-Z0-9-]+)["\']?',
-        r'["\'](-{2}[a-zA-Z0-9-]+)["\']',
-        r'(-{2}[a-zA-Z0-9-]+)'
-    ]
+    # 查找格式为["--xxx", "--yyy"]或['--xxx', '--yyy']的pass列表
+    pass_list_pattern = r'\[((?:"--[a-zA-Z0-9-]+"|\'--[a-zA-Z0-9-]+\')(?:\s*,\s*(?:"--[a-zA-Z0-9-]+"|\'--[a-zA-Z0-9-]+\'))*)\]'
+    match = re.search(pass_list_pattern, think_content)
     
-    for pattern in pass_patterns:
-        match = re.search(pattern, think_content, re.IGNORECASE)
-        if match:
-            return [match.group(1)]
-    
-    # 如果上面的模式都没匹配到，尝试查找所有--开头的字符串
-    all_passes = re.findall(r'(-{2}[a-zA-Z0-9-]+)', think_content)
-    if all_passes:
-        return all_passes
-            
+    if match:
+        # 提取列表内容
+        passes_str = match.group(1)
+        # 分割并清理引号
+        passes = []
+        for p in re.findall(r'(?:"(--[a-zA-Z0-9-]+)"|\'(--[a-zA-Z0-9-]+)\')', passes_str):
+            # 每个匹配项是一个元组，取非空的那个
+            pass_item = p[0] if p[0] else p[1]
+            passes.append(pass_item)
+        return passes
     return None
+
+# def extract_pass_from_think(think_content: str) -> Optional[List[str]]:
+#     """从think内容中提取优化pass。
+    
+#     Args:
+#         think_content: think内容
+        
+#     Returns:
+#         提取的优化pass列表，如果没有找到则返回None
+#     """
+#     # 尝试匹配"--"开头的优化pass
+#     pass_patterns = [
+#         r'使用(?:优化pass|pass|优化选项)\s*["\']?(-{2}[a-zA-Z0-9-]+)["\']?',
+#         r'选择(?:优化pass|pass|优化选项)\s*["\']?(-{2}[a-zA-Z0-9-]+)["\']?',
+#         r'应用(?:优化pass|pass|优化选项)\s*["\']?(-{2}[a-zA-Z0-9-]+)["\']?',
+#         r'(?:优化pass|pass|优化选项)[：:]\s*["\']?(-{2}[a-zA-Z0-9-]+)["\']?',
+#         r'["\'](-{2}[a-zA-Z0-9-]+)["\']',
+#         r'(-{2}[a-zA-Z0-9-]+)'
+#     ]
+    
+#     for pattern in pass_patterns:
+#         match = re.search(pattern, think_content, re.IGNORECASE)
+#         if match:
+#             return [match.group(1)]
+    
+#     # 如果上面的模式都没匹配到，尝试查找所有--开头的字符串
+#     all_passes = re.findall(r'(-{2}[a-zA-Z0-9-]+)', think_content)
+#     if all_passes:
+#         return all_passes
+            
+#     return None
 
 def extract_tool_call_data(assistant_block: str) -> Optional[Dict[str, Any]]:
     """提取工具调用数据。
@@ -165,245 +208,290 @@ def parse_optimization_sequence(sequence_str: str) -> List[str]:
     """Parse the optimization sequence string into a list.
     
     Args:
-        sequence_str: Optimization sequence string
+        sequence_str: Optimization sequence string from <answer> tag
         
     Returns:
         List of optimization options
     """
+    if not sequence_str:
+        return []
+        
     try:
-        # Attempt to parse JSON string
-        if sequence_str.startswith('[') and sequence_str.endswith(']'):
+        # Try to parse as JSON directly
+        return json.loads(sequence_str)
+    except json.JSONDecodeError:
+        # If direct parsing fails, try to extract JSON array pattern
+        json_array_pattern = r'\[(.*?)\]'
+        match = re.search(json_array_pattern, sequence_str, re.DOTALL)
+        if match:
             try:
-                return json.loads(sequence_str)
+                # Try to parse the extracted content
+                return json.loads(f"[{match.group(1)}]")
             except json.JSONDecodeError:
                 pass
-        
-        # 尝试解析Markdown代码块内的内容
-        code_block_pattern = r'```(?:json)?\s*(\[.*?\])\s*```'
-        code_match = re.search(code_block_pattern, sequence_str, re.DOTALL)
-        if code_match:
-            try:
-                return json.loads(code_match.group(1))
-            except json.JSONDecodeError:
-                pass
-        
-        # 尝试解析以半角逗号分隔的列表
-        if ',' in sequence_str:
-            items = sequence_str.strip('[]').replace("'", "").replace('"', '').split(',')
-            return [item.strip() for item in items if item.strip()]
+                
+        # If JSON parsing fails, try to extract individual optimization passes
+        passes = re.findall(r'--[a-zA-Z0-9-]+', sequence_str)
+        if passes:
+            return passes
             
-        # 尝试解析以全角逗号分隔的列表
-        if '，' in sequence_str:
-            items = sequence_str.strip('[]').replace("'", "").replace('"', '').split('，')
-            return [item.strip() for item in items if item.strip()]
-            
-        # 如果以上方法都失败，尝试匹配所有--开头的选项
-        if '--' in sequence_str:
-            options = re.findall(r'(--[a-zA-Z0-9-]+)', sequence_str)
-            if options:
-                return options
-        
-        return []
-    except Exception as e:
-        print(f"[DEBUG] Error parsing optimization sequence: {e}")
-        return []
+    return []
 
 def compute_score_format(solution_str: str) -> float:
-    """Compute the format reward score.
+    """Compute the format reward score based on SFT format.
     
     Args:
         solution_str: Solution text
         
     Returns:
-        Format reward score (0.0-1.0)
+        Format reward score (0.0-10.0)
     """
     if solution_str is None:
         return 0.0
     
     try:
-        # Check basic structure
+        # Extract assistant blocks
         assistant_blocks = re.findall(r'<\|im_start\|>assistant\n(.*?)<\|im_end\|>', solution_str, re.DOTALL)
         
         if not assistant_blocks:
             return 0.0
         
-        format_reward = 0.0
+        total_reward = 0.0
+        total_think_blocks = 0
+        total_tool_call_blocks = 0
+        total_tool_response_blocks = 0
         
-        # Check each assistant block (except the last one)
-        has_think_with_pass = False
-        has_gen_autophase_tool_call = False
-        
-        for i, assistant_block in enumerate(assistant_blocks[:-1]):
-            # 检查是否有包含优化pass的think和有效的工具调用
-            if '<think>' in assistant_block and '</think>' in assistant_block:
-                think_content = extract_think_content(assistant_block)
-                if think_content:
-                    pass_list = extract_pass_from_think(think_content)
-                    if pass_list:
-                        has_think_with_pass = True
-                        format_reward += 0.2
+        # Check conversation format according to SFT structure
+        for i, block in enumerate(assistant_blocks):
+            # Count <think> blocks
+            think_blocks = re.findall(r'<think>(.*?)</think>', block, re.DOTALL)
+            total_think_blocks += len(think_blocks)
             
-            if '<tool_call>' in assistant_block and '</tool_call>' in assistant_block:
-                tool_data = extract_tool_call_data(assistant_block)
-                if tool_data and tool_data.get('name') == 'gen_autophase':
-                    has_gen_autophase_tool_call = True
-                    format_reward += 0.2
-            
-            # 检查格式：<think>...</think>\n<tool_call>...</tool_call>
-            if (assistant_block.count('<think>') == 1 and 
-                assistant_block.count('</think>') == 1 and 
-                assistant_block.count('<tool_call>') == 1 and 
-                assistant_block.count('</tool_call>') == 1):
-                think_match = re.search(r'^<think>(.*?)</think>\n<tool_call>(.*?)</tool_call>$', 
-                                      assistant_block, re.DOTALL)
-                if think_match:
-                    format_reward += 0.1
-        
-        # 检查最后一个回复是否包含答案
-        if assistant_blocks:
-            last_assistant_block = assistant_blocks[-1]
-            think_answer_match = re.search(r'^<think>(.*?)</think>\n<answer>(.*?)</answer>$', 
-                                         last_assistant_block, re.DOTALL)
-            if think_answer_match:
-                format_reward += 0.5
-                answer_content = extract_answer(last_assistant_block)
-                if answer_content and len(parse_optimization_sequence(answer_content)) > 0:
-                    format_reward += 0.5
-        
-        if has_think_with_pass and has_gen_autophase_tool_call:
-            format_reward += 0.5
+            # Give points for well-formed <think> blocks
+            for think in think_blocks:
+                # Check if the think block has meaningful content
+                if len(think.strip()) > 50:  # Arbitrary threshold for meaningful content
+                    total_reward += 0.2
                 
-        return min(format_reward, 2.0)
+                # Check if think block contains analysis of features
+                if re.search(r'(feature|instruction count|TotalInsts)', think):
+                    total_reward += 0.3
+                
+                # Check if think block mentions passes to be applied
+                if re.search(r'(pass|--[a-zA-Z0-9-]+)', think):
+                    total_reward += 0.3
+            
+            # Count <tool_call> blocks
+            tool_call_blocks = re.findall(r'<tool_call>(.*?)</tool_call>', block, re.DOTALL)
+            total_tool_call_blocks += len(tool_call_blocks)
+            
+            # Give points for well-formed <tool_call> blocks
+            for tool_call in tool_call_blocks:
+                # Check if the tool call has "analyze_autophase" name
+                if re.search(r'"name"\s*:\s*"analyze_autophase"', tool_call):
+                    total_reward += 0.2
+                
+                # Check if the tool call has proper arguments
+                if re.search(r'"arguments"\s*:\s*{.*"filename".*"optimization_passes"', tool_call, re.DOTALL):
+                    total_reward += 0.3
+                
+                # Check if optimization_passes is a well-formed array
+                if re.search(r'"optimization_passes"\s*:\s*\[.*\]', tool_call, re.DOTALL):
+                    total_reward += 0.2
+            
+            # Count <tool_response> blocks
+            tool_response_blocks = re.findall(r'<tool_response>(.*?)</tool_response>', block, re.DOTALL)
+            total_tool_response_blocks += len(tool_response_blocks)
+            
+            # Give points for well-formed <tool_response> blocks
+            for tool_response in tool_response_blocks:
+                # Check if the tool response has a status field
+                if re.search(r'"status"\s*:\s*"(success|error)"', tool_response):
+                    total_reward += 0.2
+                
+                # Check if the tool response has a feature_analysis field
+                if re.search(r'"feature_analysis"\s*:', tool_response):
+                    total_reward += 0.3
+        
+        # Check final answer block
+        if assistant_blocks:
+            last_block = assistant_blocks[-1]
+            
+            # Check if last block has <answer> tag
+            answer_match = re.search(r'<answer>(.*?)</answer>', last_block, re.DOTALL)
+            if answer_match:
+                total_reward += 1.0
+                
+                answer_content = answer_match.group(1).strip()
+                
+                # Check if the answer is a valid JSON array of passes
+                try:
+                    json.loads(answer_content)
+                    total_reward += 1.0
+                except json.JSONDecodeError:
+                    # If it's not valid JSON but has the structure of an array
+                    if answer_content.startswith('[') and answer_content.endswith(']'):
+                        total_reward += 0.5
+                    
+                    # Check if it at least contains passes
+                    if re.search(r'--[a-zA-Z0-9-]+', answer_content):
+                        total_reward += 0.3
+        
+        # Determine if the overall pattern matches the expected SFT structure
+        expected_pattern = True
+        
+        # Must have at least one think-tool-response cycle
+        if total_think_blocks == 0 or total_tool_call_blocks == 0 or total_tool_response_blocks == 0:
+            expected_pattern = False
+        
+        # The number of blocks should be roughly balanced
+        if abs(total_think_blocks - total_tool_call_blocks) > 1 or abs(total_think_blocks - total_tool_response_blocks) > 1:
+            expected_pattern = False
+        
+        if expected_pattern:
+            # Reward following the expected pattern
+            total_reward += 2.0
+        
+        # Cap the total reward
+        return min(total_reward, 10.0)
         
     except Exception as e:
         print(f"[DEBUG] Error in compute_score_format: {e}")
         return 0.0
 
 def trace_agent_optimization_process(solution_str: str, ll_code: str) -> Tuple[List[str], float]:
-    """追踪代理的优化过程，提取最终的pass序列，并计算overOz。
+    """Extract the final pass sequence from the answer tag and calculate overOz.
     
     Args:
-        solution_str: 解决方案文本
-        ll_code: 原始LLVM IR代码
+        solution_str: Solution text
+        ll_code: LLVM IR code
         
     Returns:
-        (优化pass列表, overOz值)
+        (optimization pass list, overOz value)
     """
     if solution_str is None or ll_code is None:
         return [], 0.0
     
     try:
-        # 提取所有助手块
+        # Extract all assistant blocks
         assistant_blocks = re.findall(r'<\|im_start\|>assistant\n(.*?)<\|im_end\|>', solution_str, re.DOTALL)
         if not assistant_blocks:
             return [], 0.0
         
-        # 尝试从最后一个block中直接提取答案
-        final_pass_list = []
+        # Get the last assistant block and extract answer
         last_block = assistant_blocks[-1]
-        answer = extract_answer(last_block)
+        answer_content = extract_answer(last_block)
         
-        if answer:
-            final_pass_list = parse_optimization_sequence(answer)
-            if final_pass_list:
-                # 计算overOz
-                llvm_tools_path = os.path.join(os.path.dirname(__file__), 
-                                              '../../../agent_r1/tool/tools/comiler_autotuning/raw_tool/')
-                try:
-                    overoz = get_overOz(ll_code, final_pass_list, llvm_tools_path=llvm_tools_path)
-                    return final_pass_list, float(overoz)
-                except Exception as e:
-                    print(f"[DEBUG] Error calculating overOz from answer: {e}")
+        if not answer_content:
+            return [], 0.0
         
-        # 如果从答案中无法直接获取，尝试从对话中重建优化过程
-        accumulated_passes = []
+        # Parse the optimization sequence from the answer
+        final_pass_list = parse_optimization_sequence(answer_content)
         
-        for block in assistant_blocks[:-1]:  # 跳过最后一个块
-            # 从工具调用中提取passes
-            tool_data = extract_tool_call_data(block)
-            if tool_data and tool_data.get('name') == 'gen_autophase':
-                passes = extract_passes_from_tool_call(tool_data)
-                if passes:
-                    # 如果passes是累积的（包含之前的passes），需要提取新添加的
-                    if accumulated_passes:
-                        new_passes = [p for p in passes if p not in accumulated_passes]
-                        accumulated_passes = passes  # 更新累积passes
-                    else:
-                        accumulated_passes = passes
+        if not final_pass_list:
+            return [], 0.0
         
-        # 如果我们重建了优化过程，使用累积的passes计算overOz
-        if accumulated_passes:
-            llvm_tools_path = os.path.join(os.path.dirname(__file__), 
-                                         '../../../agent_r1/tool/tools/comiler_autotuning/raw_tool/')
-            try:
-                overoz = get_overOz(ll_code, accumulated_passes, llvm_tools_path=llvm_tools_path)
-                return accumulated_passes, float(overoz)
-            except Exception as e:
-                print(f"[DEBUG] Error calculating overOz from accumulated passes: {e}")
-        
-        return final_pass_list or accumulated_passes, 0.0
-        
+        # Calculate overOz using the extracted passes
+        llvm_tools_path = os.path.join(os.path.dirname(__file__), 
+                                     '../../../agent_r1/tool/tools/comiler_autotuning/raw_tool/')
+        try:
+            overoz = get_overOz(ll_code, final_pass_list, llvm_tools_path=llvm_tools_path)
+            return final_pass_list, float(overoz)
+        except Exception as e:
+            print(f"[DEBUG] Error calculating overOz: {e}")
+            return final_pass_list, 0.0
+            
     except Exception as e:
         print(f"[DEBUG] Error in trace_agent_optimization_process: {e}")
         return [], 0.0
 
 def compute_score_answer(solution_str: Optional[str], ground_truth: Optional[Union[str, List[str]]]) -> float:
-    """Compute the answer reward score.
+    """Compute the answer reward score based on the overOz value.
     
     Args:
         solution_str: Solution text
-        ground_truth: Ground truth (ll_code)
+        ground_truth: Ground truth (filename)
         
     Returns:
-        Answer reward score
+        Answer reward score (-10.0 to 15.0)
     """
     if solution_str is None or ground_truth is None:
         return -10.0
     
     try:
-        # 提取最终答案和计算overOz
-        ll_code = ground_truth if isinstance(ground_truth, str) else ground_truth[0]
+        # Get the filename from ground_truth
+        filename = ground_truth if isinstance(ground_truth, str) else ground_truth[0]
+        ll_file_path = os.path.join(os.path.dirname(__file__) + "/../../../examples/data_preprocess/llvmir_datasets/", filename)
+        ll_code = read_llvm_ir_file(ll_file_path)
+        
+        if not ll_code:
+            return -10.0
+        
+        # Extract optimization passes and calculate overOz
         pass_list, overoz = trace_agent_optimization_process(solution_str, ll_code)
         print(f"[DEBUG] pass_list: {pass_list}, overoz: {overoz}")
-
-        if pass_list:
-            if overoz is not None:
-                reward = overoz * 5.0
-                return reward
+        
+        # No valid passes found
+        if not pass_list:
+            return -10.0
+        
+        # Define reward based on overOz value
+        if overoz > 0:
+            # Positive overOz (better than -Oz optimization)
+            if overoz > 0.1:
+                # Significantly better than -Oz
+                reward = min(20.0 * overoz, 15.0)
             else:
-                reward = -10.0
-                return reward
+                # Slightly better than -Oz
+                reward = 10.0 * overoz
         else:
-            reward = -10.0
-            return reward
+            # Negative overOz (worse than -Oz optimization)
+            reward = max(overoz * 8.0, -6.0)
+        
+        return reward
+        
     except Exception as e:
         print(f"[DEBUG] Error in compute_score_answer: {e}")
         return -10.0
 
 def compute_score_format_answer(solution_str: str, ground_truth: Union[str, List[str]]) -> float:
-    """Compute the total reward score (format reward + answer reward).
+    """Compute the total reward score combining format and answer scores.
     
     Args:
         solution_str: Solution text
-        ground_truth: Ground truth (ll_code)
+        ground_truth: Ground truth (filename)
         
     Returns:
-        Total reward score
+        Total reward score (-10.0 to 15.0)
     """
     if solution_str is None or ground_truth is None:
         return 0.0
-
+    
     try:
+        # Calculate individual scores
         format_reward = compute_score_format(solution_str)
         answer_reward = compute_score_answer(solution_str, ground_truth)
-
-        # 总奖励 = 格式奖励 + 答案奖励
-        total_reward = 0.2 * format_reward + 0.8 * answer_reward
         
-        print(f"[DEBUG] Format reward: {format_reward}, Answer reward: {answer_reward}, Total: {total_reward}")
+        print(f"[DEBUG] Format reward: {format_reward}, Answer reward: {answer_reward}")
+        
+        # Calculate total reward based on both scores
+        if answer_reward > 0:
+            # For positive answer rewards, put more weight on the answer (actual optimization)
+            if answer_reward > 8.0:
+                # For exceptional optimization results, make answer even more important
+                total_reward = 0.1 * format_reward + 0.9 * answer_reward
+            else:
+                # For good optimization results
+                total_reward = 0.2 * format_reward + 0.8 * answer_reward
+        else:
+            # For negative answer rewards, penalize heavily but still consider format
+            total_reward = 0.05 * format_reward + 0.95 * answer_reward
+        
+        # Ensure reward is within acceptable bounds
+        total_reward = min(max(total_reward, -10.0), 15.0)
         
         return total_reward
-            
+        
     except Exception as e:
         print(f"[DEBUG] Error in compute_score_format_answer: {e}")
         return 0.0

@@ -61,6 +61,6 @@ def get_instrcount(ll_code, *opt_flags, llvm_tools_path=None):
 
 def get_overOz(ll_code, opt_flags, llvm_tools_path=None):
     ic_value = get_instrcount(ll_code, *opt_flags, llvm_tools_path=llvm_tools_path)
-    oz_value = get_instrcount(ll_code, [""],llvm_tools_path=llvm_tools_path)
+    oz_value = get_instrcount(ll_code, ["-Oz"],llvm_tools_path=llvm_tools_path)
     overoz = (oz_value - ic_value) / oz_value
     return overoz

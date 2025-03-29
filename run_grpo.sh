@@ -13,17 +13,18 @@ export CUDA_LAUNCH_BLOCKING=1
 
 # 确保 Ray 使用 Compiler-R1 环境
 export PYTHONPATH=/root/anaconda3/envs/Compiler-R1/bin:$PYTHONPATH
+export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/verl/
 
 python3 -m agent_r1.src.main_agent \
     algorithm.adv_estimator=grpo \
-    data.train_files=/root/data/compiler_autotuning/train.parquet \
-    data.val_files=/root/data/compiler_autotuning/validation.parquet \
+    data.train_files=$HOME/data/compiler_autotuning_grpo/train.parquet \
+    data.val_files=$HOME/data/compiler_autotuning_grpo/validation.parquet \
     data.train_batch_size=32 \
     data.max_prompt_length=8192 \
     data.max_response_length=8192 \
     data.max_start_length=8192 \
     data.max_tool_response_length=8192 \
-    actor_rollout_ref.model.path=$BASE_MODEL \
+    actor_rollout_ref.model.path=$latest_checkpoint \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
@@ -43,12 +44,13 @@ python3 -m agent_r1.src.main_agent \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.kl_ctrl.kl_coef=0.001 \
     trainer.critic_warmup=0 \
-    trainer.logger=['console','wandb'] \
-    trainer.project_name=$PROJECT_NAME \
-    trainer.experiment_name=$EXPERIMENT_NAME \
-    trainer.n_gpus_per_node=4 \
+    "trainer.logger=[console,wandb]" \
+    trainer.project_name=$project_name \
+    trainer.experiment_name=$grpo_experiment_name \
+    trainer.n_gpus_per_node=$nproc_per_node \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=10 \
     trainer.total_epochs=1 \
-    tool.env='optimizer' $@
+    trainer.total_training_steps=$grpo_steps \
+    tool.env='optimizer'

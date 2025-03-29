@@ -87,16 +87,14 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_file', default='compiler_autotuning_data.csv',
                         help='Path to the compiler autotuning data CSV file')
+    parser.add_argument('--val_file', default='cbench-val.csv',
+                        help='Path to the validation data CSV file')
     parser.add_argument('--llvm_ir_dir', default=None, 
                         help='Directory containing LLVM IR files (optional)')
     parser.add_argument('--local_dir', default='~/data/compiler_autotuning',
                         help='Local directory to save the processed data')
     parser.add_argument('--hdfs_dir', default=None,
                         help='HDFS directory to save the processed data')
-    parser.add_argument('--train_ratio', type=float, default=0.8,
-                        help='Ratio of data to use for training')
-    parser.add_argument('--val_ratio', type=float, default=0.1,
-                        help='Ratio of data to use for validation')
     parser.add_argument('--test_ratio', type=float, default=0.1,
                         help='Ratio of data to use for testing')
     parser.add_argument('--max_samples', type=int, default=None,
@@ -114,10 +112,10 @@ if __name__ == '__main__':
     local_dir = os.path.expanduser(args.local_dir)
     os.makedirs(local_dir, exist_ok=True)
 
-    # Load the dataset
+    # Load the main dataset
     print(f"Loading compiler autotuning data from {args.data_file}...")
     
-    # Determine the full path to the CSV file
+    # Determine the full path to the main CSV file
     if os.path.isabs(args.data_file):
         csv_path = args.data_file
     else:
@@ -130,112 +128,137 @@ if __name__ == '__main__':
         else:
             raise FileNotFoundError(f"Could not find {args.data_file}")
     
-    # Read the CSV file
-    df = pd.read_csv(csv_path)
+    # Read the main CSV file
+    main_df = pd.read_csv(csv_path)
+    
+    # Load the validation dataset
+    print(f"Loading validation data from {args.val_file}...")
+    
+    # Determine the full path to the validation CSV file
+    if os.path.isabs(args.val_file):
+        val_csv_path = args.val_file
+    else:
+        # If it's a relative path, check if it's in the current directory
+        if os.path.exists(args.val_file):
+            val_csv_path = args.val_file
+        # Check if it's in the same directory as this script
+        elif os.path.exists(os.path.join(os.path.dirname(__file__), args.val_file)):
+            val_csv_path = os.path.join(os.path.dirname(__file__), args.val_file)
+        else:
+            raise FileNotFoundError(f"Could not find {args.val_file}")
+    
+    # Read the validation CSV file
+    val_df = pd.read_csv(val_csv_path)
+    
+    print(f"Loaded {len(main_df)} main samples and {len(val_df)} validation samples")
     
     # Limit the number of samples if needed
-    if args.max_samples is not None and args.max_samples < len(df):
-        df = df.sample(n=args.max_samples, random_state=args.seed)
-    
-    print(f"Loaded {len(df)} samples")
+    if args.max_samples is not None and args.max_samples < len(main_df):
+        main_df = main_df.sample(n=args.max_samples, random_state=args.seed)
+        print(f"Limited main dataset to {len(main_df)} samples")
     
     # 获取所有可用的优化passes
     all_passes = get_all_passes()
     print(f"Found {len(all_passes)} available optimization passes")
     
-    # Process the dataframe
-    data_records = []
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing data"):
-        # Extract filename
-        filename = row['Filename']
-        
-        # Read LLVM IR code if directory is provided
-        ll_code = None
-        if args.llvm_ir_dir is not None:
-            ll_file_path = os.path.join(args.llvm_ir_dir, filename)
-            ll_code = read_llvm_ir_file(ll_file_path)
-        
-        if ll_code:
-            # 计算初始的autophase特征
-            initial_features = get_autophase_features(ll_code)
+    # Process the main dataframe for training and testing
+    def process_dataframe(df, llvm_ir_dir=None):
+        data_records = []
+        for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing data"):
+            # Extract filename
+            filename = row['Filename']
+            overoz = row['OverOz']
+            pass_sequence = row['PassSequence']
             
-            if initial_features:
-                # Create record
-                record = {
-                    'filename': filename,
-                    'll_code': ll_code,  # 保留原始代码，用于后续计算overOz
-                    'autophase_features': json.dumps(initial_features)
-                }
+            # Read LLVM IR code if directory is provided
+            ll_code = None
+            if llvm_ir_dir is not None:
+                ll_file_path = os.path.join(llvm_ir_dir, filename)
+                ll_code = read_llvm_ir_file(ll_file_path)
+            
+            if ll_code:
+                # 计算初始的autophase特征
+                initial_features = get_autophase_features(ll_code)
                 
-                data_records.append(record)
+                if initial_features:
+                    # Create record
+                    record = {
+                        'filename': filename,
+                        'll_code': ll_code,  # 保留原始代码，用于后续计算overOz
+                        'autophase_features': json.dumps(initial_features),
+                        'overoz' : overoz,
+                        'pass_sequence': pass_sequence
+                    }
+                    
+                    data_records.append(record)
+                else:
+                    print(f"Warning: Failed to get autophase features for {filename}, skipping")
             else:
-                print(f"Warning: Failed to get autophase features for {filename}, skipping")
-        else:
-            print(f"Warning: Failed to read {filename}, skipping")
+                print(f"Warning: Failed to read {filename}, skipping")
+        
+        return data_records
     
-    # Create dataset
-    dataset = datasets.Dataset.from_pandas(pd.DataFrame(data_records))
+    # Process main dataset (for train and test)
+    main_records = process_dataframe(main_df, args.llvm_ir_dir)
+    main_dataset = datasets.Dataset.from_pandas(pd.DataFrame(main_records))
     
-    # Split the dataset
-    splits = dataset.train_test_split(
-        test_size=args.val_ratio + args.test_ratio,
+    # Process validation dataset
+    val_records = process_dataframe(val_df, args.llvm_ir_dir)
+    val_dataset = datasets.Dataset.from_pandas(pd.DataFrame(val_records))
+    
+    # Split the main dataset into train and test
+    splits = main_dataset.train_test_split(
+        test_size=args.test_ratio,
         seed=args.seed
     )
     train_dataset = splits['train']
+    test_dataset = splits['test']
     
-    val_test_splits = splits['test'].train_test_split(
-        test_size=args.test_ratio / (args.val_ratio + args.test_ratio),
-        seed=args.seed
-    )
-    validation_dataset = val_test_splits['train']
-    test_dataset = val_test_splits['test']
+    # Use the dedicated validation dataset
+    validation_dataset = val_dataset
     
     print(f"Dataset split: {len(train_dataset)} train, {len(validation_dataset)} validation, {len(test_dataset)} test")
     
     # Instruction template
-    instruction_following = """优化给定的LLVM IR代码以减少指令数量。
+    instruction_following = """Act as a compiler optimization expert working to find an optimal pass sequence for LLVM IR. Your goal is to reduce the total instruction count.
 
-由于LLVM IR代码太长，我们使用autophase特征来代表代码。这些特征捕捉了代码的关键统计特性。
+The LLVM IR code is represented by autophase features due to its length. These features capture key statistical properties of the code.
 
-你的任务是：
-1. 分析初始autophase特征
-2. 在<think>...</think>中思考，选择一个LLVM优化pass
-3. 使用gen_autophase工具，将选择的pass应用到代码上，并获取新的autophase特征
-4. 分析新的特征，决定下一个要应用的pass
-5. 重复步骤2-4，重复至少10轮，构建一个有效的优化pass序列
-6. 最后在<answer>中输出完整的优化pass列表
+Your task is to:
+1. Analyze the initial autophase features in <think>.
+2. Choose LLVM optimization passes based on the analysis in <think>.
+3. Make a tool call to `analyze_autophase` with the selected passes.
+4. Review the tool response to understand the impact of your optimization choices.
+5. Repeat steps 1-4 to iteratively build an effective optimization pass sequence.
+6. Finally, output the complete list of optimization passes in <answer>.
 
-可用的工具:
-1. gen_autophase: 生成应用优化passes后的autophase特征
-   {"name": "gen_autophase", "arguments": {"filename": "文件名", "optimization_passes": ["--adce", "--inline"]}}
-
-每轮交互的格式：
+The format for each round of interaction:
 <think>
-分析当前的autophase特征，我认为应该使用XX优化...（选择一个优化pass）
+Analyze the features and explain your reasoning for selecting specific optimization passes.
 </think>
+
 <tool_call>
-{"name": "gen_autophase", "arguments": {"filename": "文件名", "optimization_passes": ["之前选择的pass", "新选择的pass"]}}
+{"name": "analyze_autophase", "arguments": {"filename": "example.ll", "optimization_passes": ["--pass1", "--pass2", ...]}}
 </tool_call>
 
-最终回答的格式:
-<think>
-经过多轮优化后，我生成了以下优化pass序列...
-</think>
+<tool_response>
+The tool will return analysis of how the features changed after applying your passes.
+</tool_response>
+
+The format for the final answer:
 <answer>
-[优化pass的列表]
+[Complete list of all optimization passes you've selected]
 </answer>
 
-最终答案必须是一个包含所有应用过的优化pass的列表，按应用顺序排列。系统将基于这个答案计算相对于-Oz的指令数减少比例。
-注意：
-1. 为一个程序找到好的pass序列是需要多探索的，所以根据autophase特征请多尝试不同的优化pass，不要放弃。
+Remember to use the exact filename provided when making tool calls. The final answer must be a JSON-formatted list of all applied optimization passes enclosed in square brackets.
 """
 
     # 添加所有可用passes的信息到指令中
-    passes_info = "\n\n可用的优化passes:\n"
-    for i, pass_info in enumerate(all_passes):
-        passes_info += f"{i}. {pass_info['pass']}\n"
+    # passes_info = "\n\n可用的优化passes:\n"
+    # for i, pass_info in enumerate(all_passes):
+    #     passes_info += f"{i}. {pass_info['pass']}\n"
     
-    instruction_following += passes_info
+    # instruction_following += passes_info
 
     # Process each data item
     def make_map_fn(split):
@@ -245,6 +268,7 @@ if __name__ == '__main__':
             ll_code = example.get('ll_code', '')
             autophase_features = example.get('autophase_features', '{}')
             pass_sequence = example.get('pass_sequence', [])
+            overoz = example.get('overoz', [])
             
             # 解析autophase特征
             try:
@@ -252,19 +276,19 @@ if __name__ == '__main__':
             except:
                 features_dict = {}
                 
-            # 创建特征表示
-            features_text = "Autophase特征:\n"
-            for key, value in features_dict.items():
-                features_text += f"- {key}: {value}\n"
+            # 创建特征表示并获取初始指令计数
+            initial_inst_count = features_dict.get('TotalInsts', 'N/A')
+            formatted_features = json.dumps(features_dict, indent=2)
+            features_text = f"The LLVM IR code is represented by autophase features:\n```json\n{formatted_features}\n```\n\nInitial instruction count: {initial_inst_count}\n"
             
             # Create prompt
-            prompt = instruction_following + "\n\n初始代码信息:\n"
-            prompt += f"文件名: {filename}\n\n"
+            prompt = instruction_following + "\n\nInitial code information:\n"
+            prompt += f"Filename for reference: {filename}\n\n"
             prompt += features_text
             
             # 添加一个提示，告诉模型如何在tool_call中使用文件名
-            prompt += f"\n注意：当调用gen_autophase工具时，请使用上面提供的文件名({filename})作为filename参数。"
-            
+            prompt += f"\nNote: When calling the analyze_autophase tool, use the exact filename provided above: {filename}"
+
             # Create data record
             data = {
                 "data_source": "compiler_autotuning",
@@ -275,13 +299,14 @@ if __name__ == '__main__':
                 "ability": "compiler_autotuning",
                 "reward_model": {
                     "style": "rule",
-                    "ground_truth": ll_code  # 保存原始LLVM IR代码作为ground truth，用于计算overOz
+                    "ground_truth": filename 
                 },
                 "extra_info": {
                     'split': split,
                     'index': str(idx),
-                    'filename': filename,
-                    'pass_sequence': pass_sequence
+                    # 'filename': filename,
+                    'pass_sequence': pass_sequence,
+                    'overoz' : overoz
                 }
             }
             return data
