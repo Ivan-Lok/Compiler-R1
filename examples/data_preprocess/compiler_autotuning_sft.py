@@ -221,13 +221,14 @@ def analyze_feature_changes(prev_features_dict, new_features_dict):
                 direction = "increase" if change > 0 else "decrease"
                 changed_features.append((key, abs(change), direction, change))
         
-        # 按特征名称排序
-        changed_features.sort(key=lambda x: x[0])
+        # 按变化幅度排序，取前5个变化最大的特征
+        changed_features.sort(key=lambda x: x[1], reverse=True)
+        top_changes = changed_features[:5]
         
-        # 生成分析文本：直接输出所有变化的特征
-        for feature, change_abs, direction, change in changed_features:
+        # 生成分析文本：只输出变化最大的前5个特征
+        for feature, change_abs, direction, change in top_changes:
             analysis.append(f"{feature}: {prev_features_dict[feature]} -> {new_features_dict[feature]} ({direction} {change_abs})")
-            
+        
         # 添加TotalInsts的变化情况
         if "TotalInsts" in common_keys:
             total_insts_change = new_features_dict["TotalInsts"] - prev_features_dict["TotalInsts"]
@@ -255,124 +256,6 @@ def analyze_feature_changes(prev_features_dict, new_features_dict):
         analysis.append(f"Feature analysis error: {e}")
     
     return ", ".join(analysis) if analysis else "Feature changes are not obvious"
-
-# def generate_thinking_process(filename, initial_autophase, pass_sequence):
-#     """
-#     生成多轮思考过程，每几个优化pass为一轮并调用工具
-    
-#     Args:
-#         filename: 文件名
-#         initial_autophase: 初始特征
-#         pass_sequence: 优化pass序列
-        
-#     Returns:
-#         完整的思考和工具调用过程
-#     """
-#     if not pass_sequence:
-#         return ""
-        
-#     result = ""
-#     current_autophase = initial_autophase
-#     ll_file_path = os.path.join(os.path.join(os.path.dirname(__file__), 
-#                                               './llvmir_datasets/'), filename)
-#     ll_code = read_llvm_ir_file(ll_file_path)
-    
-#     if len(pass_sequence) > 30:
-#         pass_sequence = pass_sequence[:30]
-
-#     # 确定每轮使用的pass数量
-#     passes_per_round = 6  # 每轮使用6个pass
-#     if len(pass_sequence) <= 5:  # 如果总数很少，每轮使用1个
-#         passes_per_round = 1
-#     elif len(pass_sequence) <= 10:  # 如果总数适中，每轮使用2个
-#         passes_per_round = 2
-#     elif len(pass_sequence) <= 15:  # 如果总数适中，每轮使用3个
-#         passes_per_round = 3
-#     elif len(pass_sequence) <= 20:  # 如果总数适中，每轮使用4个
-#         passes_per_round = 4
-#     elif len(pass_sequence) <= 25:  # 如果总数适中，每轮使用5个
-#         passes_per_round = 5
-    
-#     # 计算总轮数(向上取整)
-#     total_rounds = (len(pass_sequence) + passes_per_round - 1) // passes_per_round
-    
-#     # 为每轮生成思考和工具调用
-#     for round_idx in range(total_rounds):
-#         # 确定当前轮次的起始和结束索引
-#         start_idx = round_idx * passes_per_round
-#         end_idx = min(start_idx + passes_per_round, len(pass_sequence))
-        
-#         # 当前轮次的passes
-#         current_round_passes = pass_sequence[start_idx:end_idx]
-#         all_passes_so_far = pass_sequence[:end_idx]
-        
-#         # 生成思考内容
-#         thinking = f"<think>\n"
-        
-#         if round_idx == 0:
-#             thinking += f"Based on the initial autophase features, I'll start with: {current_round_passes}\n"
-#             # 添加对初始pass的解释
-#             for pass_name in current_round_passes:
-#                 if pass_name in PASS_DESCRIPTIONS:
-#                     thinking += f"- {pass_name}: {PASS_DESCRIPTIONS[pass_name]}\n"
-#         else:
-#             thinking += f"Let me analyze how the features have changed after applying previous passes and select more passes.\n"
-#             thinking += f"Next passes to apply: {current_round_passes}\n"
-#             # 添加对新选择pass的解释
-#             for pass_name in current_round_passes:
-#                 if pass_name in PASS_DESCRIPTIONS:
-#                     thinking += f"- {pass_name}: {PASS_DESCRIPTIONS[pass_name]}\n"
-        
-#         thinking += "</think>\n"
-        
-#         # 生成工具调用 - 使用合并后的工具
-#         tool_call = f"<tool_call>\n"
-#         tool_call += f'{{"name": "analyze_autophase", "arguments": {{"filename": "{filename}", "optimization_passes": {json.dumps(all_passes_so_far)}}}}}\n'
-#         tool_call += "</tool_call>\n\n"
-        
-#         try:
-#             # 更新当前autophase并生成工具响应
-#             llvm_tools_path = os.path.join(os.path.dirname(__file__), 
-#                                         '../../agent_r1/tool/tools/comiler_autotuning/raw_tool/')
-#             # 获取原始特征
-#             original_features = get_autophase_features(ll_code)
-            
-#             # 应用优化并获取优化后特征
-#             optimized_code = GenerateOptimizedLLCode(ll_code, all_passes_so_far, llvm_tools_path=llvm_tools_path)
-#             optimized_features = get_autophase_features(optimized_code)
-            
-#             # 分析特征变化
-#             feature_analysis = analyze_feature_changes(original_features, optimized_features)
-            
-#             # 构建工具响应
-#             tool_response = f"<tool_response>\n"
-#             tool_response += json.dumps({
-#                 "feature_analysis": feature_analysis,
-#                 "status": "success"
-#             }, indent=2)
-#             tool_response += "\n</tool_response>\n\n"
-            
-#             # 更新当前代码和特征
-#             ll_code = optimized_code
-#             current_autophase = optimized_features
-#         except Exception as e:
-#             # 处理优化过程中可能出现的错误
-#             tool_response = f"<tool_response>\n"
-#             tool_response += json.dumps({
-#                 "feature_analysis": f"Error applying optimization passes: {str(e)}",
-#                 "status": "error"
-#             }, indent=2)
-#             tool_response += "\n</tool_response>\n\n"
-        
-#         # 添加到结果
-#         result += thinking + tool_call + tool_response
-    
-#     # 生成最终答案
-#     answer = "<answer>\n"
-#     answer += f"{pass_sequence}\n"
-#     answer += "</answer>"
-
-#     return result + answer
 
 def generate_thinking_process(filename, initial_autophase, pass_sequence):
     """
@@ -405,38 +288,28 @@ def generate_thinking_process(filename, initial_autophase, pass_sequence):
     # Use a dummy path if running standalone without the full structure
     llvm_tools_path = os.path.join(os.path.dirname(__file__), '../../agent_r1/tool/tools/comiler_autotuning/raw_tool/')
 
-    # Sequence Truncation (optional, consider if needed)
-    MAX_PASSES = 50
-    if len(pass_sequence) > MAX_PASSES:
-        print(f"Warning: Pass sequence truncated from {len(pass_sequence)} to {MAX_PASSES}")
-        pass_sequence = pass_sequence[:MAX_PASSES]
-
-    # --- Dynamic Passes Per Round ---
+    # Fix to exactly 5 rounds
+    total_rounds = 5
+    
+    # Handle case where pass sequence is very short
+    if len(pass_sequence) < 5:
+        # Distribute passes evenly if possible, or duplicate passes
+        if len(pass_sequence) == 0:
+            # Empty sequence case
+            artificial_passes = ["--simplifycfg", "--sroa", "--early-cse", "--gvn", "--instcombine"]
+            pass_sequence = artificial_passes
+        elif len(pass_sequence) == 1:
+            # Just one pass - duplicate it for all 5 rounds
+            pass_sequence = pass_sequence * 5
+        else:
+            # 2-4 passes - distribute them and repeat as needed
+            while len(pass_sequence) < 5:
+                pass_sequence.append(random.choice(pass_sequence))
+    
+    # Split the passes into 5 equal parts (or as close as possible)
     n_passes = len(pass_sequence)
-    if n_passes <= 5: passes_per_round = 1
-    elif n_passes <= 10: passes_per_round = 2
-    elif n_passes <= 15: passes_per_round = 3
-    elif n_passes <= 20: passes_per_round = 4
-    elif n_passes <= 25: passes_per_round = 5
-    elif n_passes <= 30: passes_per_round = 6
-    elif n_passes <= 35: passes_per_round = 7
-    elif n_passes <= 40: passes_per_round = 8
-    elif n_passes <= 45: passes_per_round = 9
-    elif n_passes <= 50: passes_per_round = 10
-    elif n_passes <= 55: passes_per_round = 11
-    elif n_passes <= 60: passes_per_round = 12
-    elif n_passes <= 65: passes_per_round = 13
-    elif n_passes <= 70: passes_per_round = 14
-    elif n_passes <= 75: passes_per_round = 15
-    elif n_passes <= 80: passes_per_round = 16
-    elif n_passes <= 85: passes_per_round = 17
-    elif n_passes <= 90: passes_per_round = 18
-    elif n_passes <= 95: passes_per_round = 19
-    elif n_passes <= 100: passes_per_round = 20
-    else: passes_per_round = 5 # Default for longer sequences
-
-    total_rounds = (n_passes + passes_per_round - 1) // passes_per_round
-
+    passes_per_round = max(1, (n_passes + total_rounds - 1) // total_rounds)
+    
     # --- State Variables for Loop ---
     previous_analysis_text = "Initial state, no analysis yet."
     # current_features holds the features *before* the current round's passes are applied
@@ -444,25 +317,39 @@ def generate_thinking_process(filename, initial_autophase, pass_sequence):
 
     # --- Loop Through Rounds ---
     for round_idx in range(total_rounds):
-        start_idx = round_idx * passes_per_round
+        # Calculate start and end indices for this round's passes
+        start_idx = min(round_idx * passes_per_round, n_passes)
         end_idx = min(start_idx + passes_per_round, n_passes)
-        current_round_passes = pass_sequence[start_idx:end_idx]
+        
+        # If we've exhausted all passes but still need to fill rounds, use the last pass
+        if start_idx >= n_passes and round_idx < total_rounds - 1:
+            current_round_passes = [pass_sequence[-1]] if pass_sequence else ["--no-op"]
+        else:
+            current_round_passes = pass_sequence[start_idx:end_idx]
+            
         # all_passes_so_far represents the state *after* this round is completed
         all_passes_so_far = pass_sequence[:end_idx]
-
+        
+        # Ensure we have passes for each round (at least duplicate the last one if needed)
+        if not current_round_passes and round_idx > 0:
+            current_round_passes = [pass_sequence[-1]]
+        
         # --- 1. Generate Thinking ---
         thinking = "<think>\n"
+        thinking += f"[Round {round_idx + 1}/{total_rounds}] "
         if round_idx == 0:
             thinking += f"Starting optimization based on initial features.\n"
             init_insts = initial_autophase.get('TotalInsts', 'N/A')
             thinking += f"Initial instruction count: {init_insts}.\n"
-            thinking += f"Applying first batch of passes: {current_round_passes}\n"
+            
+            # 确保以列表形式列出passes
+            thinking += f"Based on the initial features, I will apply the following passes: {json.dumps(current_round_passes)}\n"
             for pass_name in current_round_passes:
                 thinking += f"- {pass_name}: {PASS_DESCRIPTIONS.get(pass_name, 'No description available.')}\n"
         else:
             thinking += f"Reviewing previous round's results before applying next passes.\n"
             # Add dynamic feedback based on previous_analysis_text
-            # thinking += f"Previous analysis: {previous_analysis_text}\n" # Include the raw analysis text
+            thinking += f"Previous analysis: {previous_analysis_text}\n" # Include the raw analysis text
             # Add interpretive sentences based on the analysis
             if "Total InstCount decreased" in previous_analysis_text:
                  thinking += f"Feedback: The previous passes were effective, reducing the total instruction count. Continuing optimization.\n"
@@ -475,14 +362,37 @@ def generate_thinking_process(filename, initial_autophase, pass_sequence):
             else: # Default if no clear signal
                  thinking += f"Feedback: Evaluating the effect of previous passes. Proceeding with the next set.\n"
 
-            thinking += f"Upon above analysis, Next passes i will apply: {current_round_passes}\n"
+            # 确保以列表形式列出passes
+            thinking += f"Upon above analysis, I will apply the following new passes: {json.dumps(current_round_passes)}\n"
             for pass_name in current_round_passes:
                 thinking += f"- {pass_name}: {PASS_DESCRIPTIONS.get(pass_name, 'No description available.')}\n"
+        
+        # 统一添加格式要求的固定句子
+        thinking += "\nTool call uses ALL passes applied up to the end of this round.\n"
+        
+        # Ensure the thinking block doesn't exceed token limit
+        if len(thinking.split()) > 2000:  # Approximate token count
+            # Truncate if needed but preserve the key elements
+            thinking_lines = thinking.split("\n")
+            # 保留开头、passes列表和结尾的固定句子
+            preserved_lines = thinking_lines[:5]  # 保留开头几行
+            
+            # 寻找并保留passes列表所在行
+            for i, line in enumerate(thinking_lines):
+                if json.dumps(current_round_passes) in line:
+                    preserved_lines.append(line)
+                    break
+            
+            # 添加结尾固定句子
+            preserved_lines.append("\nTool call uses ALL passes applied up to the end of this round.")
+            
+            thinking = "\n".join(preserved_lines)
+        
         thinking += "</think>\n"
 
         # --- 2. Generate Tool Call ---
-        # Tool call uses ALL passes applied up to the end of this round
         tool_call = f"<tool_call>\n"
+        # 确保使用所有累积的passes
         tool_call += f'''{{"name": "analyze_autophase","arguments": {{"filename": "{filename}","optimization_passes": {json.dumps(all_passes_so_far)}}}}}'''
         tool_call += "\n</tool_call>\n\n"
 
@@ -524,17 +434,22 @@ def generate_thinking_process(filename, initial_autophase, pass_sequence):
         # Format the tool response
         tool_response = f"<tool_response>\n"
         tool_response += json.dumps(tool_response_content, indent=2)
-        tool_response += "\n</tool_response>\n\n"
+        tool_response += "\n</tool_response>"
+        
+        # 在最后一轮后，不添加额外换行，确保<answer>紧随其后
+        if round_idx < 4:  # 0-indexed, so round_idx 4 is the 5th round
+            tool_response += "\n\n"
+        else:
+            # 已经达到五轮开始输出answer
+            tool_response += "\n<!-- five_rounds_thinking_complete: generating_answer -->\n"
 
         # Append round results to the final SFT sample string
         result += thinking + tool_call + tool_response
 
-        # Stop if error occurred? For SFT generation, maybe continue to show error handling.
+        # Handle error - but continue to complete 5 rounds
         if tool_response_content["status"] == "error" or "Invalid" in tool_response:
-            print(f"Stopping generation for {filename} due to error tool calling.")
-            # Optionally add a final error message before the answer
-            result += "<error>Optimization process interrupted due to error.</error>\n\n"
-            break # Exit the loop
+            print(f"Warning: Error in tool response for {filename} in round {round_idx+1}, continuing anyway.")
+            # Continue to next round to ensure we have exactly 5 rounds
 
     # --- 4. Final Answer ---
     # The final answer is the complete "good" sequence that was processed.
@@ -622,24 +537,30 @@ def main():
             
             # 为SFT构造问题和答案
             question = f"""Act as a compiler optimization expert simulating the process of finding an optimal pass sequence for LLVM IR. Your goal is to reduce the total instruction count.
-
-The LLVM IR code is represented by autophase features:
-```json
-{formatted_features}
-```
-
-Initial instruction count: {initial_inst_count}
-
 Your task is to simulate the process of finding a good optimization sequence using <think>, <tool_call>, and <tool_response> steps. The goal is to minimize the final instruction count.
 
+IMPORTANT FORMATTING REQUIREMENTS:
+1. You MUST generate EXACTLY 5 rounds of <think>/<tool_call>/<tool_response> cycles - no more, no less.
+2. In each tool call, you MUST use ALL optimization passes applied up to that point in the sequence.
+3. In each round, you MUST first list the passes you plan to apply (like ['--newgvn', '--lower-expect']), then end with "Tool call uses ALL passes applied up to the end of this round."
+4. Your entire response MUST NOT exceed 5192 tokens in length.
+5. After completing [Round 5/5], you must immediately output your final answer in <answer> tags without continuing to any additional rounds.
+
+Process:
 1. Analyze the initial features in `<think>`.
 2. Choose a batch of LLVM optimization passes based on the analysis and previous results (if any) in `<think>`.
 3. Make a `<tool_call>` to `analyze_autophase` with the cumulative pass sequence applied so far.
 4. Use the feature analysis from `<tool_response>` to inform the next `<think>` step.
-5. Repeat steps 1-4 iteratively following the provided successful trajectory.
-6. Finally, output the complete target pass sequence (the one used in the final tool call of the provided successful trajectory) in `<answer>`.
+5. Repeat steps 1-4 for exactly 5 rounds, following the provided trajectory.
+6. Finally, output the complete target pass sequence (the one used in the final tool call) in `<answer>`.
 
-Filename for reference: {filename}
+Filename for tool call reference: {filename}
+The LLVM IR code is represented by autophase features, the initial autophase features are:
+```json
+{formatted_features}
+```
+Initial instruction count: {initial_inst_count}
+
 """
             
             # 生成思考过程和工具调用
@@ -655,8 +576,7 @@ Filename for reference: {filename}
                 'over_oz': over_oz
             }
 
-            # if len(record['question'] + record['answer']) >= 8192:
-            #     print(len(record['question'] + record['answer']))
+            # print((record['question'] + record['answer']))
             
             data_records.append(record)
         except Exception as e:

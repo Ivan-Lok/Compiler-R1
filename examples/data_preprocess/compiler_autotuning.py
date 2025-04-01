@@ -220,37 +220,24 @@ if __name__ == '__main__':
     print(f"Dataset split: {len(train_dataset)} train, {len(validation_dataset)} validation, {len(test_dataset)} test")
     
     # Instruction template
-    instruction_following = """Act as a compiler optimization expert working to find an optimal pass sequence for LLVM IR. Your goal is to reduce the total instruction count.
+    instruction_following = """Act as a compiler optimization expert simulating the process of finding an optimal pass sequence for LLVM IR. Your goal is to reduce the total instruction count.
+Your task is to simulate the process of finding a good optimization sequence using <think>, <tool_call>, and <tool_response> steps. The goal is to minimize the final instruction count.
 
-The LLVM IR code is represented by autophase features due to its length. These features capture key statistical properties of the code.
+IMPORTANT FORMATTING REQUIREMENTS:
+1. You MUST generate EXACTLY 5 rounds of <think>/<tool_call>/<tool_response> cycles - no more, no less.
+2. In each tool call, you MUST use ALL optimization passes applied up to that point in the sequence.
+3. In each round, you MUST first list the passes you plan to apply (like ['--newgvn', '--lower-expect']), then end with "Tool call uses ALL passes applied up to the end of this round."
+4. Your entire response MUST NOT exceed 5192 tokens in length.
+5. After completing [Round 5/5], you must immediately output your final answer in <answer> tags without continuing to any additional rounds.
 
-Your task is to:
-1. Analyze the initial autophase features in <think>.
-2. Choose LLVM optimization passes based on the analysis in <think>.
-3. Make a tool call to `analyze_autophase` with the selected passes.
-4. Review the tool response to understand the impact of your optimization choices.
-5. Repeat steps 1-4 to iteratively build an effective optimization pass sequence.
-6. Finally, output the complete list of optimization passes in <answer>.
+Process:
+1. Analyze the initial features in `<think>`.
+2. Choose a batch of LLVM optimization passes based on the analysis and previous results (if any) in `<think>`.
+3. Make a `<tool_call>` to `analyze_autophase` with the cumulative pass sequence applied so far.
+4. Use the feature analysis from `<tool_response>` to inform the next `<think>` step.
+5. Repeat steps 1-4 for exactly 5 rounds, following the provided trajectory.
+6. Finally, output the complete target pass sequence (the one used in the final tool call) in `<answer>`.
 
-The format for each round of interaction:
-<think>
-Analyze the features and explain your reasoning for selecting specific optimization passes.
-</think>
-
-<tool_call>
-{"name": "analyze_autophase", "arguments": {"filename": "example.ll", "optimization_passes": ["--pass1", "--pass2", ...]}}
-</tool_call>
-
-<tool_response>
-The tool will return analysis of how the features changed after applying your passes.
-</tool_response>
-
-The format for the final answer:
-<answer>
-[Complete list of all optimization passes you've selected]
-</answer>
-
-Remember to use the exact filename provided when making tool calls. The final answer must be a JSON-formatted list of all applied optimization passes enclosed in square brackets.
 """
 
     # 添加所有可用passes的信息到指令中
@@ -279,11 +266,11 @@ Remember to use the exact filename provided when making tool calls. The final an
             # 创建特征表示并获取初始指令计数
             initial_inst_count = features_dict.get('TotalInsts', 'N/A')
             formatted_features = json.dumps(features_dict, indent=2)
-            features_text = f"The LLVM IR code is represented by autophase features:\n```json\n{formatted_features}\n```\n\nInitial instruction count: {initial_inst_count}\n"
+            features_text = f"The LLVM IR code is represented by autophase features, the initial autophase features are:\n```json\n{formatted_features}\n```\n\nInitial instruction count: {initial_inst_count}\n"
             
             # Create prompt
-            prompt = instruction_following + "\n\nInitial code information:\n"
-            prompt += f"Filename for reference: {filename}\n\n"
+            prompt = instruction_following + " \n"
+            prompt += f"Filename for tool call reference: {filename}\n\n"
             prompt += features_text
             
             # 添加一个提示，告诉模型如何在tool_call中使用文件名

@@ -103,13 +103,14 @@ class AutophaseAnalyzerTool(Tool):
                     direction = "increase" if change > 0 else "decrease"
                     changed_features.append((key, abs(change), direction, change))
             
-            # 按特征名称排序
-            changed_features.sort(key=lambda x: x[0])
+            # 按变化幅度排序，取前5个变化最大的特征
+            changed_features.sort(key=lambda x: x[1], reverse=True)
+            top_changes = changed_features[:5]
             
-            # 生成分析文本：直接输出所有变化的特征
-            for feature, change_abs, direction, change in changed_features:
+            # 生成分析文本：只输出变化最大的前5个特征
+            for feature, change_abs, direction, change in top_changes:
                 analysis.append(f"{feature}: {prev_features_dict[feature]} -> {new_features_dict[feature]} ({direction} {change_abs})")
-                
+            
             # 添加TotalInsts的变化情况
             if "TotalInsts" in common_keys:
                 total_insts_change = new_features_dict["TotalInsts"] - prev_features_dict["TotalInsts"]

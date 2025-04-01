@@ -73,9 +73,10 @@ if [ -f "$HOME/data/compiler_autotuning_sft/train.parquet" ] && \
         mkdir -p $HOME/data/compiler_autotuning_sft
         export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
         python3 -m examples.data_preprocess.compiler_autotuning_sft \
-          --data_file=examples/data_preprocess/compiler_autotuning_data.csv \
+          --data_file=examples/data_preprocess/train_random200max_LLM.csv \
           --local_dir=$HOME/data/compiler_autotuning_sft \
-          --llvm_ir_dir=examples/data_preprocess/llvmir_datasets
+          --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
+          --max_samples=2000
     else
         echo "使用现有的SFT数据集继续..."
     fi
@@ -87,12 +88,13 @@ else
     export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
     python3 -m examples.data_preprocess.compiler_autotuning_sft \
       --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
-      --data_file=examples/data_preprocess/compiler_autotuning_data.csv \
-      --local_dir=$HOME/data/compiler_autotuning_sft
+      --data_file=examples/data_preprocess/train_random200max_LLM.csv \
+      --local_dir=$HOME/data/compiler_autotuning_sft \
+      --max_samples=2000
 fi
 
 # 检查SFT检查点是否存在
-latest_checkpoint=$(ls -d $sft_output_dir/global_step_* 2>/dev/null | sort -V | tail -n 1)
+latest_checkpoint=$(ls -dt $sft_output_dir/global_step_* 2>/dev/null | head -n 1)
 if [ ! -z "$latest_checkpoint" ]; then
     echo "检测到已存在的SFT检查点: $latest_checkpoint"
     read -p "是否重新进行SFT训练？(y/n): " retrain_sft
@@ -113,12 +115,14 @@ if [ ! -z "$latest_checkpoint" ]; then
           data.micro_batch_size_per_gpu=4 \
           data.prompt_key=extra_info \
           data.response_key=extra_info \
-          optim.lr=1e-5 \
+          optim.lr=1e-4 \
           +data.prompt_dict_keys=['question'] \
           +data.response_dict_keys=['answer'] \
           data.micro_batch_size=1 \
-          data.max_length=15000 \
+          data.max_length=8192 \
           model.partial_pretrain=$base_model \
+          +model.torch_dtype=float16 \
+          +model.attn_implementation=flash_attention_2 \
           trainer.default_local_dir=$sft_output_dir \
           trainer.project_name=$project_name \
           trainer.experiment_name=$sft_experiment_name \
@@ -131,7 +135,7 @@ if [ ! -z "$latest_checkpoint" ]; then
 
         echo "SFT训练完成，模型保存在 $sft_output_dir"
         # 更新最新的检查点路径
-        latest_checkpoint=$(ls -d $sft_output_dir/global_step_* 2>/dev/null | sort -V | tail -n 1)
+        latest_checkpoint=$(ls -dt $sft_output_dir/global_step_* 2>/dev/null | head -n 1)
     else
         echo "使用现有的SFT检查点继续..."
     fi
@@ -156,8 +160,10 @@ else
       +data.prompt_dict_keys=['question'] \
       +data.response_dict_keys=['answer'] \
       data.micro_batch_size=1 \
-      data.max_length=15000 \
+      data.max_length=8192 \
       model.partial_pretrain=$base_model \
+      +model.torch_dtype=float16 \
+      +model.attn_implementation=flash_attention_2 \
       trainer.default_local_dir=$sft_output_dir \
       trainer.project_name=$project_name \
       trainer.experiment_name=$sft_experiment_name \
@@ -170,7 +176,7 @@ else
 
     echo "SFT训练完成，模型保存在 $sft_output_dir"
     # 获取最新的检查点路径
-    latest_checkpoint=$(ls -d $sft_output_dir/global_step_* 2>/dev/null | sort -V | tail -n 1)
+    latest_checkpoint=$(ls -dt $sft_output_dir/global_step_* 2>/dev/null | head -n 1)
 fi
 
 if [ -z "$latest_checkpoint" ]; then
@@ -195,7 +201,7 @@ if [ -f "$HOME/data/compiler_autotuning_grpo/train.parquet" ] && \
         echo "准备增强版GRPO数据..."
         export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
         python3 -m examples.data_preprocess.compiler_autotuning \
-          --data_file=examples/data_preprocess/compiler_autotuning_data.csv \
+          --data_file=examples/data_preprocess/train_random200max_LLM.csv \
           --local_dir=$HOME/data/compiler_autotuning_grpo \
           --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
           --val_file=examples/data_preprocess/cbench-val.csv
@@ -206,12 +212,13 @@ else
     echo "准备增强版GRPO数据..."
     export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
     python3 -m examples.data_preprocess.compiler_autotuning \
-      --data_file=examples/data_preprocess/compiler_autotuning_data.csv \
-      --local_dir=$HOME/data/compiler_autotuning_grpo \
-      --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
-      --val_file=examples/data_preprocess/cbench-val.csv
+          --data_file=examples/data_preprocess/train_random200max_LLM.csv \
+          --local_dir=$HOME/data/compiler_autotuning_grpo \
+          --llvm_ir_dir=examples/data_preprocess/llvmir_datasets/train/ \
+          --val_file=examples/data_preprocess/cbench-val.csv
 fi
 
+# GRPO阶段使用4个GPU (0,1,2,3)
 export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/verl/
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 # 运行GRPO训练，使用SFT训练好的模型
@@ -219,30 +226,43 @@ python3 -m agent_r1.src.main_agent \
   algorithm.adv_estimator=grpo \
   data.train_files=$HOME/data/compiler_autotuning_grpo/train.parquet \
   data.val_files=$HOME/data/compiler_autotuning_grpo/validation.parquet \
-  data.train_batch_size=32 \
-  data.max_prompt_length=8192 \
-  data.max_response_length=8192 \
-  data.max_start_length=8192 \
-  data.max_tool_response_length=8192 \
+  +data.num_workers=32 \
+  data.train_batch_size=64 \
+  data.max_prompt_length=1536 \
+  data.max_response_length=3072 \
+  data.max_start_length=1536 \
+  data.max_tool_response_length=512 \
+  \
   actor_rollout_ref.model.path=$latest_checkpoint \
-  actor_rollout_ref.actor.optim.lr=1e-6 \
+  +actor_rollout_ref.model.torch_dtype=float16 \
+  +actor_rollout_ref.model.attn_implementation=flash_attention_2 \
   actor_rollout_ref.model.use_remove_padding=True \
+  actor_rollout_ref.model.enable_gradient_checkpointing=False \
+  \
+  actor_rollout_ref.actor.optim.lr=5e-7 \
   actor_rollout_ref.actor.ppo_mini_batch_size=16 \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
   actor_rollout_ref.actor.use_kl_loss=True \
-  actor_rollout_ref.actor.kl_loss_coef=0.001 \
+  actor_rollout_ref.actor.kl_loss_coef=0.05 \
   actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-  actor_rollout_ref.model.enable_gradient_checkpointing=True \
+  +actor_rollout_ref.actor.fsdp_config.model_dtype=float16 \
   actor_rollout_ref.actor.fsdp_config.param_offload=False \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
-  actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
+  \
   actor_rollout_ref.rollout.name=vllm \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
+  actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
   actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
-  actor_rollout_ref.rollout.n_repeat=5 \
-  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
-  actor_rollout_ref.ref.fsdp_config.param_offload=True \
-  algorithm.kl_ctrl.kl_coef=0.001 \
+  actor_rollout_ref.rollout.n_repeat=1 \
+  actor_rollout_ref.rollout.dtype=float16 \
+  +actor_rollout_ref.rollout.stop='["[Round 6/5", "\n<think>"]' \
+  +actor_rollout_ref.rollout.detokenize=True \
+  \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
+  actor_rollout_ref.ref.fsdp_config.param_offload=False \
+  \
+  algorithm.kl_ctrl.kl_coef=0.05 \
+  \
   trainer.critic_warmup=0 \
   "trainer.logger=[console,wandb]" \
   trainer.project_name=$project_name \
@@ -253,6 +273,7 @@ python3 -m agent_r1.src.main_agent \
   trainer.test_freq=10 \
   trainer.total_epochs=1 \
   trainer.total_training_steps=$grpo_steps \
+  \
   tool.env='optimizer'
 
 echo "完成SFT和GRPO训练流程！" 

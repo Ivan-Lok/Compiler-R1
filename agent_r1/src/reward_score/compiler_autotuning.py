@@ -238,126 +238,181 @@ def parse_optimization_sequence(sequence_str: str) -> List[str]:
     return []
 
 def compute_score_format(solution_str: str) -> float:
-    """Compute the format reward score based on SFT format.
-    
-    Args:
-        solution_str: Solution text
-        
-    Returns:
-        Format reward score (0.0-10.0)
     """
-    if solution_str is None:
+    计算基于严格格式要求的奖励分数。
+
+    主要检查点：
+    1.  是否严格包含5轮 <think>/<tool_call>/<tool_response>。
+    2.  每个 <think> 块是否包含正确的 `[Round x/5]` 标记。
+    3.  是否在第5轮之后紧跟着 <answer> 标签。
+    4.  <answer> 标签后是否有多余的轮次或标签。
+    5.  (可选) 内部轮次的其他一致性。
+
+    Args:
+        solution_str: 模型生成的完整响应文本。
+
+    Returns:
+        格式奖励分数 (范围可能从 -15.0 到 10.0)。
+        - 严重违反格式（如超过5轮, 错误Round标记）将导致大的负分。
+        - 完全符合格式将得到高分。
+    """
+    print(f"--- Computing Score for Solution ---\n{solution_str[:500]}...\n--- END ---") # 打印前缀用于调试
+
+    # --- 基本设置 ---
+    MAX_SCORE = 10.0
+    PENALTY_EXCEED_ROUNDS = -15.0 # 超过5轮的严厉惩罚
+    PENALTY_MISSING_ANSWER = -2.0
+    PENALTY_JUNK_AFTER_ANSWER = -5.0
+    PENALTY_MULTIPLE_ANSWERS = -5.0
+    PENALTY_MISSING_ROUND_MARKER = -1.5 # 每个缺失标记的惩罚
+    PENALTY_WRONG_TOTAL_ROUNDS_MARKER = -1.5 # 每个标记 /y != 5 的惩罚
+    PENALTY_WRONG_ROUND_INDEX_MARKER = -1.0 # 每个标记 x != i+1 的惩罚
+
+    REWARD_BASE_CORRECT_ROUNDS = 1.0 # 基础分：轮数结构正确
+    REWARD_SINGLE_ANSWER = 2.0     # 奖励：有且只有一个答案标签
+    REWARD_CLEAN_AFTER_ANSWER = 0.5  # 奖励：答案后面干净
+    REWARD_PER_CORRECT_INTERNAL_ROUND = 1.0 # 每轮内部格式基本正确的奖励 (包括Round标记)
+    # 总内部奖励 = 5 * 1.0 = 5.0
+    # 最高理论分数 = 1.0 + 2.0 + 0.5 + 5.0 = 8.5 (可以调整使其接近10.0)
+    # 调整一下让最高接近10:
+    REWARD_BASE_CORRECT_ROUNDS = 2.0
+    REWARD_SINGLE_ANSWER = 3.0
+    # 最高理论 = 2.0 + 3.0 + 0.5 + 5.0 = 10.5 (将被min(MAX_SCORE)限制)
+
+
+    if not solution_str:
+        print("[DEBUG] Solution is empty or None.")
         return 0.0
-    
-    try:
-        # Extract assistant blocks
-        assistant_blocks = re.findall(r'<\|im_start\|>assistant\n(.*?)<\|im_end\|>', solution_str, re.DOTALL)
-        
-        if not assistant_blocks:
-            return 0.0
-        
-        total_reward = 0.0
-        total_think_blocks = 0
-        total_tool_call_blocks = 0
-        total_tool_response_blocks = 0
-        
-        # Check conversation format according to SFT structure
-        for i, block in enumerate(assistant_blocks):
-            # Count <think> blocks
-            think_blocks = re.findall(r'<think>(.*?)</think>', block, re.DOTALL)
-            total_think_blocks += len(think_blocks)
-            
-            # Give points for well-formed <think> blocks
-            for think in think_blocks:
-                # Check if the think block has meaningful content
-                if len(think.strip()) > 50:  # Arbitrary threshold for meaningful content
-                    total_reward += 0.2
-                
-                # Check if think block contains analysis of features
-                if re.search(r'(feature|instruction count|TotalInsts)', think):
-                    total_reward += 0.3
-                
-                # Check if think block mentions passes to be applied
-                if re.search(r'(pass|--[a-zA-Z0-9-]+)', think):
-                    total_reward += 0.3
-            
-            # Count <tool_call> blocks
-            tool_call_blocks = re.findall(r'<tool_call>(.*?)</tool_call>', block, re.DOTALL)
-            total_tool_call_blocks += len(tool_call_blocks)
-            
-            # Give points for well-formed <tool_call> blocks
-            for tool_call in tool_call_blocks:
-                # Check if the tool call has "analyze_autophase" name
-                if re.search(r'"name"\s*:\s*"analyze_autophase"', tool_call):
-                    total_reward += 0.2
-                
-                # Check if the tool call has proper arguments
-                if re.search(r'"arguments"\s*:\s*{.*"filename".*"optimization_passes"', tool_call, re.DOTALL):
-                    total_reward += 0.3
-                
-                # Check if optimization_passes is a well-formed array
-                if re.search(r'"optimization_passes"\s*:\s*\[.*\]', tool_call, re.DOTALL):
-                    total_reward += 0.2
-            
-            # Count <tool_response> blocks
-            tool_response_blocks = re.findall(r'<tool_response>(.*?)</tool_response>', block, re.DOTALL)
-            total_tool_response_blocks += len(tool_response_blocks)
-            
-            # Give points for well-formed <tool_response> blocks
-            for tool_response in tool_response_blocks:
-                # Check if the tool response has a status field
-                if re.search(r'"status"\s*:\s*"(success|error)"', tool_response):
-                    total_reward += 0.2
-                
-                # Check if the tool response has a feature_analysis field
-                if re.search(r'"feature_analysis"\s*:', tool_response):
-                    total_reward += 0.3
-        
-        # Check final answer block
-        if assistant_blocks:
-            last_block = assistant_blocks[-1]
-            
-            # Check if last block has <answer> tag
-            answer_match = re.search(r'<answer>(.*?)</answer>', last_block, re.DOTALL)
-            if answer_match:
-                total_reward += 1.0
-                
-                answer_content = answer_match.group(1).strip()
-                
-                # Check if the answer is a valid JSON array of passes
-                try:
-                    json.loads(answer_content)
-                    total_reward += 1.0
-                except json.JSONDecodeError:
-                    # If it's not valid JSON but has the structure of an array
-                    if answer_content.startswith('[') and answer_content.endswith(']'):
-                        total_reward += 0.5
-                    
-                    # Check if it at least contains passes
-                    if re.search(r'--[a-zA-Z0-9-]+', answer_content):
-                        total_reward += 0.3
-        
-        # Determine if the overall pattern matches the expected SFT structure
-        expected_pattern = True
-        
-        # Must have at least one think-tool-response cycle
-        if total_think_blocks == 0 or total_tool_call_blocks == 0 or total_tool_response_blocks == 0:
-            expected_pattern = False
-        
-        # The number of blocks should be roughly balanced
-        if abs(total_think_blocks - total_tool_call_blocks) > 1 or abs(total_think_blocks - total_tool_response_blocks) > 1:
-            expected_pattern = False
-        
-        if expected_pattern:
-            # Reward following the expected pattern
-            total_reward += 2.0
-        
-        # Cap the total reward
-        return min(total_reward, 10.0)
-        
-    except Exception as e:
-        print(f"[DEBUG] Error in compute_score_format: {e}")
+
+    # 1. 提取助手回答内容
+    assistant_match = re.search(r'<\|im_start\|>assistant\n(.*?)(<\|im_end\|>|$)', solution_str, re.DOTALL)
+    if not assistant_match:
+        print("[DEBUG] Could not find assistant block.")
         return 0.0
+    assistant_content = assistant_match.group(1).strip()
+
+    # 2. 查找所有核心标签块
+    think_blocks = re.findall(r'<think>(.*?)</think>', assistant_content, re.DOTALL)
+    tool_call_blocks = re.findall(r'<tool_call>(.*?)</tool_call>', assistant_content, re.DOTALL)
+    tool_response_blocks = re.findall(r'<tool_response>(.*?)</tool_response>', assistant_content, re.DOTALL)
+    answer_blocks = re.findall(r'<answer>(.*?)</answer>', assistant_content, re.DOTALL)
+
+    num_think = len(think_blocks)
+    num_tool_call = len(tool_call_blocks)
+    num_tool_response = len(tool_response_blocks)
+    num_answer = len(answer_blocks)
+
+    print(f"[DEBUG] Found Blocks: Think={num_think}, ToolCall={num_tool_call}, ToolResponse={num_tool_response}, Answer={num_answer}")
+
+    # 3. 核心规则检查：轮数必须精确为5
+    # --- 惩罚：超过5轮 ---
+    if num_think > 5 or num_tool_call > 5 or num_tool_response > 5:
+        print(f"[DEBUG] FAIL: Exceeded 5 rounds. Applying LARGE PENALTY.")
+        return PENALTY_EXCEED_ROUNDS
+    # --- 奖励基础：恰好5轮 ---
+    elif num_think == 5 and num_tool_call == 5 and num_tool_response == 5:
+        print("[DEBUG] PASS: Exactly 5 rounds structure detected.")
+        total_reward = REWARD_BASE_CORRECT_ROUNDS
+    # --- 不奖励/零分：少于5轮 ---
+    else:
+        print(f"[DEBUG] FAIL: Incorrect number of rounds ({num_think}/{num_tool_call}/{num_tool_response}), less than 5. Score is 0.")
+        return 0.0
+
+    # --- 如果我们达到这里，意味着结构轮数 = 5 ---
+
+    # 4. 检查内部轮次的一致性和格式，特别是 [Round x/5]
+    internal_consistency_score = 0.0
+    all_internal_rounds_ok = True # 假设所有轮次内部都OK
+
+    for i in range(5): # 遍历 0 到 4
+        think_content = think_blocks[i]
+        # tool_call_content = tool_call_blocks[i] # 可选，用于其他检查
+        # tool_response_content = tool_response_blocks[i] # 可选
+
+        round_num = i + 1
+        current_round_score = REWARD_PER_CORRECT_INTERNAL_ROUND # 该轮的满分
+        round_format_ok = True
+
+        # --- 检查 [Round x/5] marker ---
+        round_marker_match = re.search(r'\[Round\s+(\d+)/(\d+)\]', think_content)
+
+        if not round_marker_match:
+            print(f"[DEBUG] Round {round_num} FAIL: Missing [Round x/y] marker in <think>. Penalty: {PENALTY_MISSING_ROUND_MARKER}")
+            total_reward += PENALTY_MISSING_ROUND_MARKER
+            round_format_ok = False
+        else:
+            try:
+                x = int(round_marker_match.group(1))
+                y = int(round_marker_match.group(2))
+
+                # 检查 y 是否为 5
+                if y != 5:
+                    print(f"[DEBUG] Round {round_num} FAIL: Incorrect total rounds marker [Round {x}/{y}] (should be /5). Penalty: {PENALTY_WRONG_TOTAL_ROUNDS_MARKER}")
+                    total_reward += PENALTY_WRONG_TOTAL_ROUNDS_MARKER
+                    round_format_ok = False
+
+                # 检查 x 是否等于当前轮数 (仅在 y=5 时检查才有意义，但分开检查逻辑更清晰)
+                if x != round_num:
+                     print(f"[DEBUG] Round {round_num} FAIL: Incorrect round index marker [Round {x}/{y}] (should be {round_num}/5). Penalty: {PENALTY_WRONG_ROUND_INDEX_MARKER}")
+                     total_reward += PENALTY_WRONG_ROUND_INDEX_MARKER
+                     # 允许 y 不为 5 和 x 不对 同时扣分
+                     round_format_ok = False
+
+                if round_format_ok: # 只有当标记完全正确时才打印PASS
+                     print(f"[DEBUG] Round {round_num} PASS: Correct [Round {x}/5] marker found.")
+
+            except ValueError:
+                 print(f"[DEBUG] Round {round_num} FAIL: Could not parse numbers in [Round x/y] marker. Penalty: {PENALTY_MISSING_ROUND_MARKER}") # 当作缺失处理
+                 total_reward += PENALTY_MISSING_ROUND_MARKER
+                 round_format_ok = False
+
+        # (可选) 添加其他内部检查，例如 tool_call 内容
+        # if '"optimization_passes":' not in tool_call_content:
+        #     print(f"[DEBUG] Round {round_num} WARN: Missing 'optimization_passes' in <tool_call>.")
+        #     # 可以选择性添加小额惩罚或不给满分
+        #     round_format_ok = False
+
+        if round_format_ok:
+            internal_consistency_score += REWARD_PER_CORRECT_INTERNAL_ROUND
+        else:
+            all_internal_rounds_ok = False # 标记至少有一轮内部格式错误
+
+    print(f"[DEBUG] Internal Consistency Score contribution: {internal_consistency_score} ({internal_consistency_score / REWARD_PER_CORRECT_INTERNAL_ROUND:.0f}/5 rounds internally ok)")
+    total_reward += internal_consistency_score # 将内部轮次分数加到总分
+
+    # 5. 检查 <answer> 标签 (只有在恰好5轮结构时才进行)
+    if num_answer == 1:
+        print("[DEBUG] PASS: Exactly one <answer> tag found.")
+        total_reward += REWARD_SINGLE_ANSWER
+
+        # 检查 <answer> 之后是否有多余内容
+        answer_match = re.search(r'</answer>', assistant_content, re.DOTALL)
+        if answer_match:
+             answer_end_pos = answer_match.end()
+             text_after_answer = assistant_content[answer_end_pos:]
+             if re.search(r'<think>|<tool_call>|<tool_response>|\[Round\s*\d+/\d+\]', text_after_answer, re.DOTALL):
+                 print(f"[DEBUG] FAIL: Invalid content found after </answer> tag. Penalty: {PENALTY_JUNK_AFTER_ANSWER}")
+                 total_reward += PENALTY_JUNK_AFTER_ANSWER
+             else:
+                 print("[DEBUG] PASS: No invalid content found after </answer> tag.")
+                 total_reward += REWARD_CLEAN_AFTER_ANSWER
+        else:
+             print("[DEBUG] WARN: Could not locate </answer> tag end position properly.")
+
+    elif num_answer > 1:
+        print(f"[DEBUG] FAIL: Multiple <answer> tags ({num_answer}) found. Penalty: {PENALTY_MULTIPLE_ANSWERS}")
+        total_reward += PENALTY_MULTIPLE_ANSWERS
+    else: # num_answer == 0
+        print(f"[DEBUG] FAIL: Missing <answer> tag (expected with 5 rounds). Penalty: {PENALTY_MISSING_ANSWER}")
+        total_reward += PENALTY_MISSING_ANSWER
+
+    # 6. 最终分数处理：确保在合理范围内
+    final_score = min(total_reward, MAX_SCORE)
+    # 最低分取决于最差情况的惩罚总和，这里是 PENALTY_EXCEED_ROUNDS
+    final_score = max(final_score, PENALTY_EXCEED_ROUNDS) # 确保不低于最大单项惩罚
+
+    print(f"[DEBUG] Final Calculated Score: {final_score}")
+    return final_score
 
 def trace_agent_optimization_process(solution_str: str, ll_code: str) -> Tuple[List[str], float]:
     """Extract the final pass sequence from the answer tag and calculate overOz.
@@ -495,3 +550,111 @@ def compute_score_format_answer(solution_str: str, ground_truth: Union[str, List
     except Exception as e:
         print(f"[DEBUG] Error in compute_score_format_answer: {e}")
         return 0.0
+
+# --- Example Usage (for testing) ---
+if __name__ == '__main__':
+    # Example 1: Perfect Format
+    perfect_solution = """<|im_start|>assistant
+<think>
+[Round 1/5] Analyzing features... Choosing initial passes: ['--instcombine', '--early-cse']. Tool call uses ALL passes applied up to the end of this round.
+</think>
+<tool_call>
+{
+  "filename": "test.ll",
+  "optimization_passes": ["--instcombine", "--early-cse"]
+}
+</tool_call>
+<tool_response>
+{"features": {...}, "inst_count": 90}
+</tool_response>
+<think>
+[Round 2/5] Inst count reduced. Adding '--sroa'. Passes: ['--instcombine', '--early-cse', '--sroa']. Tool call uses ALL passes applied up to the end of this round.
+</think>
+<tool_call>
+{
+  "filename": "test.ll",
+  "optimization_passes": ["--instcombine", "--early-cse", "--sroa"]
+}
+</tool_call>
+<tool_response>
+{"features": {...}, "inst_count": 85}
+</tool_response>
+<think>
+[Round 3/5] Good progress. Trying '--gvn'. Passes: ['--instcombine', '--early-cse', '--sroa', '--gvn']. Tool call uses ALL passes applied up to the end of this round.
+</think>
+<tool_call>
+{
+  "filename": "test.ll",
+  "optimization_passes": ["--instcombine", "--early-cse", "--sroa", "--gvn"]
+}
+</tool_call>
+<tool_response>
+{"features": {...}, "inst_count": 80}
+</tool_response>
+<think>
+[Round 4/5] Adding '--licm'. Passes: ['--instcombine', '--early-cse', '--sroa', '--gvn', '--licm']. Tool call uses ALL passes applied up to the end of this round.
+</think>
+<tool_call>
+{
+  "filename": "test.ll",
+  "optimization_passes": ["--instcombine", "--early-cse", "--sroa", "--gvn", "--licm"]
+}
+</tool_call>
+<tool_response>
+{"features": {...}, "inst_count": 78}
+</tool_response>
+<think>
+[Round 5/5] Final pass '--instsimplify'. Passes: ['--instcombine', '--early-cse', '--sroa', '--gvn', '--licm', '--instsimplify']. Tool call uses ALL passes applied up to the end of this round.
+</think>
+<tool_call>
+{
+  "filename": "test.ll",
+  "optimization_passes": ["--instcombine", "--early-cse", "--sroa", "--gvn", "--licm", '--instsimplify']
+}
+</tool_call>
+<tool_response>
+{"features": {...}, "inst_count": 75}
+</tool_response>
+<answer>["--instcombine", "--early-cse", "--sroa", "--gvn", "--licm", "--instsimplify"]</answer><|im_end|>
+"""
+    print("\n--- Testing Perfect Solution ---")
+    score1 = compute_score_format(perfect_solution)
+    print(f"Score for perfect solution: {score1}") # Expected: Close to 10.0
+
+    # Example 2: Exceeds 5 rounds
+    too_many_rounds_solution = perfect_solution.replace("<answer>", """</tool_response>
+<think>
+[Round 6/5] Oh wait, let me try one more thing... '--deadargelim'. Passes: [...]. Tool call uses ALL passes applied up to the end of this round.
+</think>
+<tool_call>
+{...}
+</tool_call>
+<tool_response>
+{...}
+</tool_response>
+<answer>... an answer ...</answer>""") + "<|im_end|>" # Ensure end tag if missing
+
+    print("\n--- Testing Too Many Rounds Solution ---")
+    score2 = compute_score_format(too_many_rounds_solution)
+    print(f"Score for too many rounds: {score2}") # Expected: -10.0
+
+    # Example 3: Missing Answer
+    missing_answer_solution = perfect_solution.split("<answer>")[0] + "<|im_end|>" # Remove answer and end tag if needed
+    print("\n--- Testing Missing Answer Solution ---")
+    score3 = compute_score_format(missing_answer_solution)
+    print(f"Score for missing answer: {score3}") # Expected: Lower positive score (e.g., around 4.0-7.0 depending on internal checks)
+
+    # Example 4: Junk after Answer
+    junk_after_answer_solution = perfect_solution.replace("</answer>", "</answer>\n<think>Oops, forgot this.</think>")
+    print("\n--- Testing Junk After Answer Solution ---")
+    score4 = compute_score_format(junk_after_answer_solution)
+    print(f"Score for junk after answer: {score4}") # Expected: Positive score, but lower than perfect due to penalty (e.g., 4.0-7.0)
+
+    # Example 5: Less than 5 rounds
+    too_few_rounds_solution = """<|im_start|>assistant
+<think>[Round 1/5] ... </think><tool_call>{...}</tool_call><tool_response>{...}</tool_response>
+<think>[Round 2/5] ... </think><tool_call>{...}</tool_call><tool_response>{...}</tool_response>
+<answer>...</answer><|im_end|>"""
+    print("\n--- Testing Too Few Rounds Solution ---")
+    score5 = compute_score_format(too_few_rounds_solution)
+    print(f"Score for too few rounds: {score5}") # Expected: 0.0
