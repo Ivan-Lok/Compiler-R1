@@ -87,15 +87,15 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_file', default='compiler_autotuning_data.csv',
                         help='Path to the compiler autotuning data CSV file')
-    parser.add_argument('--val_file', default='cbench-val.csv',
-                        help='Path to the validation data CSV file')
+    parser.add_argument('--val_files', nargs='+', default=['cbench-val.csv'],
+                        help='List of paths to validation data CSV files')
     parser.add_argument('--llvm_ir_dir', default=None, 
                         help='Directory containing LLVM IR files (optional)')
     parser.add_argument('--local_dir', default='~/data/compiler_autotuning',
                         help='Local directory to save the processed data')
     parser.add_argument('--hdfs_dir', default=None,
                         help='HDFS directory to save the processed data')
-    parser.add_argument('--test_ratio', type=float, default=0.1,
+    parser.add_argument('--test_ratio', type=float, default=0.001,
                         help='Ratio of data to use for testing')
     parser.add_argument('--max_samples', type=int, default=None,
                         help='Maximum number of samples to process')
@@ -130,27 +130,6 @@ if __name__ == '__main__':
     
     # Read the main CSV file
     main_df = pd.read_csv(csv_path)
-    
-    # Load the validation dataset
-    print(f"Loading validation data from {args.val_file}...")
-    
-    # Determine the full path to the validation CSV file
-    if os.path.isabs(args.val_file):
-        val_csv_path = args.val_file
-    else:
-        # If it's a relative path, check if it's in the current directory
-        if os.path.exists(args.val_file):
-            val_csv_path = args.val_file
-        # Check if it's in the same directory as this script
-        elif os.path.exists(os.path.join(os.path.dirname(__file__), args.val_file)):
-            val_csv_path = os.path.join(os.path.dirname(__file__), args.val_file)
-        else:
-            raise FileNotFoundError(f"Could not find {args.val_file}")
-    
-    # Read the validation CSV file
-    val_df = pd.read_csv(val_csv_path)
-    
-    print(f"Loaded {len(main_df)} main samples and {len(val_df)} validation samples")
     
     # Limit the number of samples if needed
     if args.max_samples is not None and args.max_samples < len(main_df):
@@ -202,10 +181,6 @@ if __name__ == '__main__':
     main_records = process_dataframe(main_df, args.llvm_ir_dir)
     main_dataset = datasets.Dataset.from_pandas(pd.DataFrame(main_records))
     
-    # Process validation dataset
-    val_records = process_dataframe(val_df, args.llvm_ir_dir)
-    val_dataset = datasets.Dataset.from_pandas(pd.DataFrame(val_records))
-    
     # Split the main dataset into train and test
     splits = main_dataset.train_test_split(
         test_size=args.test_ratio,
@@ -214,29 +189,85 @@ if __name__ == '__main__':
     train_dataset = splits['train']
     test_dataset = splits['test']
     
-    # Use the dedicated validation dataset
-    validation_dataset = val_dataset
+    # Process validation datasets (multiple)
+    validation_datasets = {}
     
-    print(f"Dataset split: {len(train_dataset)} train, {len(validation_dataset)} validation, {len(test_dataset)} test")
+    for val_file in args.val_files:
+        # Get a base name for this validation dataset (without extension)
+        val_base_name = os.path.splitext(os.path.basename(val_file))[0]
+        print(f"Loading validation data from {val_file}...")
+        
+        # Determine the full path to the validation CSV file
+        if os.path.isabs(val_file):
+            val_csv_path = val_file
+        else:
+            # If it's a relative path, check if it's in the current directory
+            if os.path.exists(val_file):
+                val_csv_path = val_file
+            # Check if it's in the same directory as this script
+            elif os.path.exists(os.path.join(os.path.dirname(__file__), val_file)):
+                val_csv_path = os.path.join(os.path.dirname(__file__), val_file)
+            else:
+                print(f"Warning: Could not find validation file {val_file}, skipping")
+                continue
+        
+        try:
+            # Read the validation CSV file
+            val_df = pd.read_csv(val_csv_path)
+            print(f"Loaded {len(val_df)} validation samples from {val_file}")
+            
+            # Process validation dataset
+            val_records = process_dataframe(val_df, args.llvm_ir_dir)
+            val_dataset = datasets.Dataset.from_pandas(pd.DataFrame(val_records))
+            
+            # Add to the validation datasets dictionary
+            validation_datasets[val_base_name] = val_dataset
+        except Exception as e:
+            print(f"Error processing validation file {val_file}: {e}")
+            continue
+    
+    # Print dataset split information
+    print(f"Dataset split: {len(train_dataset)} train, {len(test_dataset)} test")
+    for val_name, val_dataset in validation_datasets.items():
+        print(f"Validation dataset '{val_name}': {len(val_dataset)} samples")
     
     # Instruction template
-    instruction_following = """Act as a compiler optimization expert simulating the process of finding an optimal pass sequence for LLVM IR. Your goal is to reduce the total instruction count.
-Your task is to simulate the process of finding a good optimization sequence using <think>, <tool_call>, and <tool_response> steps. The goal is to minimize the final instruction count.
+    instruction_following = f"""Act as a compiler optimization expert simulating the process of finding an optimal pass sequence for LLVM IR, aiming to reduce the total instruction count. Generate a response simulating this process using `<think>`, `<tool_call>`, and `<tool_response>` interactions.
 
-IMPORTANT FORMATTING REQUIREMENTS:
-1. You MUST generate EXACTLY 5 rounds of <think>/<tool_call>/<tool_response> cycles - no more, no less.
-2. In each tool call, you MUST use ALL optimization passes applied up to that point in the sequence.
-3. In each round, you MUST first list the passes you plan to apply (like ['--newgvn', '--lower-expect']), then end with "Tool call uses ALL passes applied up to the end of this round."
-4. Your entire response MUST NOT exceed 5192 tokens in length.
-5. After completing [Round 5/5], you must immediately output your final answer in <answer> tags without continuing to any additional rounds.
+**Follow these STRICT formatting requirements:**
 
-Process:
-1. Analyze the initial features in `<think>`.
-2. Choose a batch of LLVM optimization passes based on the analysis and previous results (if any) in `<think>`.
-3. Make a `<tool_call>` to `analyze_autophase` with the cumulative pass sequence applied so far.
-4. Use the feature analysis from `<tool_response>` to inform the next `<think>` step.
-5. Repeat steps 1-4 for exactly 5 rounds, following the provided trajectory.
-6. Finally, output the complete target pass sequence (the one used in the final tool call) in `<answer>`.
+1.  **Exactly 5 Rounds:**
+    *   Generate exactly 5 rounds. Each round consists of:
+        *   An assistant turn: `<|im_start|>assistant\\n<think>...</think>\\n<tool_call>...</tool_call>\\n<|im_end|>`
+        *   Followed immediately by a user turn (you receive this): `<|im_start|>user\\n<tool_response>...</tool_response>\\n<|im_end|>`
+    *   **Crucially:** Generating more or fewer than 5 rounds is a major format error.
+
+2.  **Think Block (`<think>...</think>`) Content:**
+    *   **Required Elements:** Each think block MUST contain:
+        *   A round marker: `[Round N/5]`
+        *   Recap/Initial state information (mentioning passes added previously).
+        *   Current instruction count.
+        *   A plan line stating: `... Adding the following passes:['--newPassA', '--newPassB']` (Use **Python list literal** for new passes).
+        *   Descriptions for the *new* passes (`- --pass: desc`).
+        *   A statement about the cumulative passes for the upcoming tool call.
+        *   **Exact Ending:** The think block MUST end with the line `\\nTool call uses ALL passes applied up to the end of this round.`
+
+3.  **Tool Call (`<tool_call>...</tool_call>`) Content:**
+    *   Must contain valid JSON: `{{"name": "analyze_autophase", "arguments": {{"filename": "...", "optimization_passes": ["--pass1", ...]}}}}`.
+    *   **Accumulation Rule:** The `"optimization_passes"` JSON list MUST be the passes from the *previous* tool call + the *new* passes listed in the current round's *think block plan*. Order matters.
+
+4.  **Final Answer Block (CRITICAL):**
+    *   **Position:** Appears IMMEDIATELY after the 5th round's user turn (`<tool_response>`).
+    *   **Structure:** MUST be a single, final assistant turn: `<|im_start|>assistant\\n<answer>...</answer>\\n<|im_end|>`.
+    *   **Content:** This block contains ONLY the `<answer>` tag. NO `<think>`, NO `<tool_call>`, NO extra text.
+    *   **Answer Format:** Inside `<answer>`, provide the final accumulated pass list (matching the 5th tool call) as a **Python list literal** string (e.g., `['--pass1', '--pass2']`).
+    *   **Absolute End:** NO content or blocks whatsoever after this final assistant turn.
+
+**Key Format Distinction:**
+*   **Tool Call Args (`optimization_passes`): Use JSON List** `["--pass1", "--pass2"]`
+*   **Think Block (Plan/Recap) & Final Answer Block (`<answer>`): Use Python List Literal** `['--pass1', '--pass2']`
+
+Focus on achieving the correct 5-round structure, the precise final answer block format and position, and the correct pass accumulation in tool calls. Use standard pass descriptions or "General optimization pass."
 
 """
 
@@ -248,7 +279,7 @@ Process:
     # instruction_following += passes_info
 
     # Process each data item
-    def make_map_fn(split):
+    def make_map_fn(split, val_source=None):
         def process_fn(example, idx):
             # Basic info
             filename = example.get('filename', '')
@@ -275,7 +306,19 @@ Process:
             
             # 添加一个提示，告诉模型如何在tool_call中使用文件名
             prompt += f"\nNote: When calling the analyze_autophase tool, use the exact filename provided above: {filename}"
-
+            
+            # Create extra_info with validation source if applicable
+            extra_info = {
+                'split': split,
+                'index': str(idx),
+                'pass_sequence': pass_sequence,
+                'overoz': overoz
+            }
+            
+            # Add validation source information if provided
+            if val_source:
+                extra_info['validation_source'] = val_source
+                
             # Create data record
             data = {
                 "data_source": "compiler_autotuning",
@@ -288,27 +331,29 @@ Process:
                     "style": "rule",
                     "ground_truth": filename 
                 },
-                "extra_info": {
-                    'split': split,
-                    'index': str(idx),
-                    # 'filename': filename,
-                    'pass_sequence': pass_sequence,
-                    'overoz' : overoz
-                }
+                "extra_info": extra_info
             }
             return data
 
         return process_fn
 
-    # Apply the processing function
+    # Apply the processing function for train and test
     train_dataset = train_dataset.map(function=make_map_fn('train'), with_indices=True)
-    validation_dataset = validation_dataset.map(function=make_map_fn('validation'), with_indices=True)
     test_dataset = test_dataset.map(function=make_map_fn('test'), with_indices=True)
     
     # Save datasets to parquet files
     train_dataset.to_parquet(os.path.join(local_dir, 'train.parquet'))
-    validation_dataset.to_parquet(os.path.join(local_dir, 'validation.parquet'))
     test_dataset.to_parquet(os.path.join(local_dir, 'test.parquet'))
+    
+    # Process and save each validation dataset
+    for val_name, val_dataset in validation_datasets.items():
+        processed_val_dataset = val_dataset.map(
+            function=make_map_fn('validation', val_source=val_name), 
+            with_indices=True
+        )
+        validation_filename = f'validation_{val_name}.parquet'
+        processed_val_dataset.to_parquet(os.path.join(local_dir, validation_filename))
+        print(f"Saved validation dataset '{val_name}' to {os.path.join(local_dir, validation_filename)}")
     
     print(f"Saved processed datasets to {local_dir}")
     

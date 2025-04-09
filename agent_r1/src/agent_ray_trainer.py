@@ -615,7 +615,24 @@ class RayAgentTrainer(object):
             except:
                 print(f"[Error] Something wrong with the reward function")
                 print(test_batch)
+                # exit() # Maybe comment exit for now to see if other batches fail
+                # Instead of just printing the batch, print the traceback
+                import traceback
+                traceback.print_exc()
+                # You might still want to print a small part of the batch for context
+                print("--- Problematic Batch (first sample) ---")
+                try:
+                    print("Filename:", test_batch.non_tensor_batch['filename'][0])
+                    response_ids = test_batch.batch['responses'][0]
+                    # Find the end of the actual response (before padding)
+                    actual_len = test_batch.batch['attention_mask'][0][-response_ids.shape[-1]:].sum().item()
+                    print("Decoded Response (first sample, actual length):", self.tokenizer.decode(response_ids[:actual_len], skip_special_tokens=False)) # Use skip_special_tokens=False to see tags
+                except Exception as e_print:
+                    print(f"Error printing sample details: {e_print}")
+                print("------------------------------------")
+                # Decide if you want to exit or continue
                 exit()
+                # return {} # Or return empty metrics if you want to continue
 
             # Store scores
             # scores = reward_tensor.sum(-1).cpu().tolist()
@@ -628,38 +645,62 @@ class RayAgentTrainer(object):
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
         reward_tensor = torch.cat(reward_tensor_lst, dim=0).sum(-1).cpu()  # (batch_size,)
-        turns_tensor = torch.cat(turns_lst, dim=0).cpu()
-        data_sources = np.concatenate(data_source_lst, axis=0)
+        turns_tensor = torch.cat(turns_lst, dim=0).cpu() # Shape: (batch_size, ) assuming turns is scalar per sample
+        data_sources = np.concatenate(data_source_lst, axis=0) # Shape: (batch_size, )
 
-        # evaluate test_score based on data source
-        data_source_reward = {}
-        data_source_answer = {}
-        data_source_format = {}
-        data_source_turns = {}
+        # Aggregate scores per data source
+        data_source_aggregates = {}
+
         for i in range(reward_tensor.shape[0]):
             data_source = data_sources[i]
-            if data_source not in data_source_reward:
-                data_source_reward[data_source] = []
-            data_source_reward[data_source].append(reward_tensor[i].item())
-            if data_source not in data_source_answer:
-                data_source_answer[data_source] = []
-            data_source_answer[data_source].append(answer_lst[i])
-            if data_source not in data_source_format:
-                data_source_format[data_source] = []
-            data_source_format[data_source].append(format_lst[i])
-            if data_source not in data_source_turns:
-                data_source_turns[data_source] = []
-            data_source_turns[data_source].append(turns_tensor[i])
-        
+            if data_source not in data_source_aggregates:
+                data_source_aggregates[data_source] = {
+                    'rewards': [],
+                    'answers': [],
+                    'formats': [],
+                    'turns': []
+                }
+            
+            data_source_aggregates[data_source]['rewards'].append(reward_tensor[i].item())
+            # Ensure answer_lst and format_lst have the correct length and access index i
+            if i < len(answer_lst):
+                 data_source_aggregates[data_source]['answers'].append(answer_lst[i])
+            if i < len(format_lst):
+                 data_source_aggregates[data_source]['formats'].append(format_lst[i])
+            # Convert turns tensor element to float/int if it's a tensor
+            turn_value = turns_tensor[i]
+            if isinstance(turn_value, torch.Tensor):
+                turn_value = turn_value.item() # Get scalar value if it's a tensor
+            data_source_aggregates[data_source]['turns'].append(float(turn_value)) # Store as float
+
+        # --- Modification Start ---
         metric_dict = {}
-        for data_source, rewards in data_source_reward.items():
-            metric_dict[f'val/test_score/{data_source}'] = np.mean(rewards)
-        for data_source, answers in data_source_answer.items():
-            metric_dict[f'val/answer_score/{data_source}'] = np.mean(answers)
-        for data_source, formats in data_source_format.items():
-            metric_dict[f'val/format_score/{data_source}'] = np.mean(formats)
-        for data_source, turns in data_source_turns.items():
-            metric_dict[f'val/turns/{data_source}'] = np.mean(turns)
+        # Define the prefix for WandB logs, you can make this dynamic if needed
+        project_prefix = "val/compiler_autotuning" 
+
+        # Helper function to clean the data source name for the metric key
+        def clean_datasource_name(ds):
+            # Example: 'val-cbench' -> 'cbench', 'unknown' -> 'unknown'
+            # Adjust this logic based on your actual data_source strings
+            if isinstance(ds, str) and ds.startswith('val-'):
+                return ds[len('val-'):]
+            return str(ds) # Return string representation just in case
+
+        for data_source, aggregates in data_source_aggregates.items():
+            cleaned_ds_name = clean_datasource_name(data_source)
+            
+            if aggregates['rewards']: # Ensure list is not empty before calculating mean
+                metric_dict[f'{project_prefix}/{cleaned_ds_name}/test_score'] = np.mean(aggregates['rewards'])
+            if aggregates['answers']:
+                 # Assuming answers are numeric scores (e.g., 0 or 1). Adjust if they are different.
+                metric_dict[f'{project_prefix}/{cleaned_ds_name}/answer_score'] = np.mean(aggregates['answers'])
+            if aggregates['formats']:
+                 # Assuming formats are numeric scores (e.g., 0 or 1). Adjust if they are different.
+                metric_dict[f'{project_prefix}/{cleaned_ds_name}/format_score'] = np.mean(aggregates['formats'])
+            if aggregates['turns']:
+                metric_dict[f'{project_prefix}/{cleaned_ds_name}/turns'] = np.mean(aggregates['turns'])
+        # --- Modification End ---
+                
         return metric_dict
 
     def init_workers(self):

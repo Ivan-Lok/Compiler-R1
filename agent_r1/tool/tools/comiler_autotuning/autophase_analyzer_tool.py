@@ -190,11 +190,9 @@ class AutophaseAnalyzerTool(Tool):
             
             # 构建结果
             result = {
-                # "original_features": original_features,
-                # "optimized_features": optimized_features,
+                "status": "success",
                 "feature_analysis": feature_analysis,
-                # "applied_passes": optimization_passes,
-                "status": "success"
+                "current_total_insts": optimized_features["TotalInsts"]
             }
             
             return json.dumps(result)
