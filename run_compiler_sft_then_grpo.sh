@@ -73,7 +73,7 @@ if [ -f "$HOME/data/compiler_autotuning_sft/train.parquet" ] && \
         mkdir -p $HOME/data/compiler_autotuning_sft
         export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
         python3 -m examples.data_preprocess.compiler_autotuning_sft \
-          --data_file=examples/data_preprocess/train_random200max_LLM.csv \
+          --data_file=examples/data_preprocess/train_random200max_LLM_new.csv \
           --local_dir=$HOME/data/compiler_autotuning_sft \
           --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
           --max_samples=4000
@@ -88,7 +88,7 @@ else
     export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
     python3 -m examples.data_preprocess.compiler_autotuning_sft \
       --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
-      --data_file=examples/data_preprocess/train_random200max_LLM.csv \
+      --data_file=examples/data_preprocess/train_random200max_LLM_new.csv \
       --local_dir=$HOME/data/compiler_autotuning_sft \
       --max_samples=4000
 fi
@@ -199,7 +199,7 @@ if [ -f "$HOME/data/compiler_autotuning_grpo/train.parquet" ] && \
         echo "准备增强版GRPO数据..."
         export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
         python3 -m examples.data_preprocess.compiler_autotuning \
-          --data_file=examples/data_preprocess/train_random200max_LLM.csv \
+          --data_file=examples/data_preprocess/train_random200max_LLM_new.csv \
           --local_dir=$HOME/data/compiler_autotuning_grpo \
           --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
           --val_files examples/data_preprocess/val-cbench.csv \
@@ -216,7 +216,7 @@ else
     echo "准备增强版GRPO数据..."
     export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
     python3 -m examples.data_preprocess.compiler_autotuning \
-          --data_file=examples/data_preprocess/train_random200max_LLM.csv \
+          --data_file=examples/data_preprocess/train_random200max_LLM_new.csv \
           --local_dir=$HOME/data/compiler_autotuning_grpo \
           --llvm_ir_dir=examples/data_preprocess/llvmir_datasets/ \
           --val_files examples/data_preprocess/val-cbench.csv \
@@ -281,5 +281,5 @@ python3 -m agent_r1.src.main_agent \
   trainer.total_epochs=1 \
   \
   tool.env='optimizer'
-
+  # trainer.total_training_steps=165 \
 echo "完成SFT和GRPO训练流程！" 

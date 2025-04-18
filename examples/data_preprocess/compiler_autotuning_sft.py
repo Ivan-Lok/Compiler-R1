@@ -156,8 +156,11 @@ PASS_DESCRIPTIONS = {
     "--strip-nondebug": "Remove all non-debug information.",
     "--strip": "Remove all symbol information.",
     "--tailcallelim": "Eliminate tail calls.",
-    "--mergereturn": "Merge multiple return points into one."
+    "--mergereturn": "Merge multiple return points into one.",
+    "-Oz": "Optimize aggressively for size."
 }
+
+DEFAULT_PASS_DESC = "General optimization pass."
 
 def read_llvm_ir_file(file_path):
     """
@@ -258,17 +261,28 @@ def analyze_feature_changes(prev_features_dict, new_features_dict):
     
     return ", ".join(analysis) if analysis else "Feature changes are not obvious"
 
+
+# --- Helper to safely get instruction count ---
+def _safe_get_inst_count(features: Optional[Dict]) -> Optional[int]:
+     """Safely extracts TotalInsts, returning None if unavailable or not integer."""
+     if not features: return None
+     count = features.get("TotalInsts")
+     if isinstance(count, int): return count
+     # Add more flexible checks if TotalInsts might be string etc.
+     try: return int(count)
+     except (ValueError, TypeError): return None
+
 # --- Main SFT Data Generation Function ---
 
 def generate_thinking_process(filename: str, initial_autophase: Dict, pass_sequence: List[str]) -> str:
     """
-    Generates a multi-round thinking process with DETAILED simulated reasoning
-    and PASS DESCRIPTIONS, distributing the pass sequence across 5 rounds.
+    Generates a multi-round SFT sample using only the 'analyze_autophase' tool,
+    including an initial -Oz check and final comparison.
 
     Args:
         filename: LLVM IR filename relative to llvmir_datasets dir.
-        initial_autophase: Initial autophase features dictionary.
-        pass_sequence: The known good optimization pass sequence (list of strings).
+        initial_autophase: Initial features of the *original* code.
+        pass_sequence: The sequence guiding the 5 optimization rounds simulation.
 
     Returns:
         A string containing the full SFT sample.
@@ -277,124 +291,187 @@ def generate_thinking_process(filename: str, initial_autophase: Dict, pass_seque
 
     # --- Initial Setup & Input Validation ---
     if not filename or initial_autophase is None or not isinstance(pass_sequence, list):
-         print("Error: Invalid input.")
-         return "<error>Invalid input provided.</error>"
+         return "<error>Invalid input: Filename, initial features, and pass sequence required.</error>"
     pass_sequence = [str(p) for p in pass_sequence if p]
-    if not pass_sequence:
-        print("Error: Empty pass sequence.")
-        return "<error>Empty pass sequence provided.</error>"
-
-    # --- Pad sequence if needed ---
-    full_pass_sequence = list(pass_sequence)
-    total_rounds = 5
-    if len(full_pass_sequence) < total_rounds:
-        padding_pass = full_pass_sequence[-1] if full_pass_sequence else "--instcombine"
-        while len(full_pass_sequence) < total_rounds:
-            full_pass_sequence.append(padding_pass)
-
-    # --- Distribute passes ---
-    n_passes = len(full_pass_sequence)
-    passes_per_round = max(1, (n_passes + total_rounds - 1) // total_rounds)
-    assigned_passes_per_round: List[List[str]] = []
-    current_start_index = 0
-    for i in range(total_rounds):
-        current_end_index = min(current_start_index + passes_per_round, n_passes)
-        round_passes = full_pass_sequence[current_start_index:current_end_index]
-        if not round_passes:
-             round_passes = [full_pass_sequence[-1]]
-        assigned_passes_per_round.append(round_passes)
-        current_start_index = current_end_index
+    if not pass_sequence: return "<error>Empty pass sequence provided.</error>"
 
     # --- Simulation Setup ---
     script_dir = os.path.dirname(os.path.abspath(__file__))
     llvmir_base_path = os.path.normpath(os.path.join(script_dir, './llvmir_datasets/'))
     ll_file_path = os.path.join(llvmir_base_path, filename)
-    llvm_tools_path = os.path.normpath(os.path.join(script_dir, '../../agent_r1/tool/tools/comiler_autotuning/raw_tool/'))
+    llvm_tools_path = os.path.normpath(os.path.join(script_dir, '../../agent_r1/tool/tools/comiler_autotuning/raw_tool/')) # Adjust if needed
+
     try:
-        if not os.path.exists(os.path.dirname(ll_file_path)):
-             raise FileNotFoundError(f"Base dir not found: {os.path.dirname(ll_file_path)}")
         original_ll_code = read_llvm_ir_file(ll_file_path)
         if original_ll_code is None: raise FileNotFoundError(f"Cannot read: {ll_file_path}")
     except Exception as e: return f"<error>Failed reading IR '{ll_file_path}': {e}</error>"
 
-    # --- State Variables ---
-    previous_analysis_text = "N/A (Initial State)"
-    previous_round_passes: List[str] = []
+    # --- <<< STEP 1: Initial -Oz Check using analyze_autophase >>> ---
+    initial_oz_think = """<think>
+[Initial Baseline Check]
+- Goal: Establish baseline performance and instruction count using standard '-Oz'.
+- Plan: Call 'analyze_autophase' with just '-Oz' to see its effect compared to the original code.
+- The resulting instruction count will be the benchmark.
+</think>"""
+    initial_oz_tool_call_args = {"filename": filename, "optimization_passes": ["-Oz"]}
+    initial_oz_tool_call_content = json.dumps({"name": "analyze_autophase", "arguments": initial_oz_tool_call_args}, separators=(',', ':'))
+    initial_oz_tool_call_str = f"<tool_call>\n{initial_oz_tool_call_content}\n</tool_call>"
+    initial_assistant_turn_oz = f"<|im_start|>assistant\n{initial_oz_think}\n{initial_oz_tool_call_str}\n<|im_end|>"
+    result_parts.append(initial_assistant_turn_oz)
+
+    # Simulate user's response for the -Oz check
+    initial_oz_tool_response_dict = {"status": "error", "feature_analysis": "Simulation error for -Oz check"}
+    oz_inst_count_from_tool: Optional[int] = None # Store count from this tool response
+    try:
+        # Simulate tool applying '-Oz' and getting features
+        oz_optimized_code = GenerateOptimizedLLCode(original_ll_code, ['-Oz'], llvm_tools_path)
+        if oz_optimized_code is None: raise ValueError("GenerateOptimizedLLCode failed for -Oz")
+        oz_features = get_autophase_features(oz_optimized_code)
+        if oz_features is None: raise ValueError("get_autophase_features failed for -Oz")
+
+        # Analyze change from initial state
+        oz_analysis_text = analyze_feature_changes(initial_autophase, oz_features)
+        initial_oz_tool_response_dict["status"] = "success"
+        initial_oz_tool_response_dict["feature_analysis"] = oz_analysis_text
+        oz_inst_count_from_tool = _safe_get_inst_count(oz_features) # Extract count
+        if oz_inst_count_from_tool is not None:
+            initial_oz_tool_response_dict["current_total_insts"] = oz_inst_count_from_tool
+        else:
+            # If count extraction fails even if feature generation worked
+            initial_oz_tool_response_dict["feature_analysis"] += " (Warning: Could not extract TotalInsts count)"
+            initial_oz_tool_response_dict["status"] = "error" # Mark as error if count missing
+
+    except Exception as e:
+         error_msg = f"Exception during -Oz analyze_autophase simulation: {e}"
+         initial_oz_tool_response_dict["feature_analysis"] = error_msg
+         print(f"Warning: {error_msg} for {filename}")
+
+    initial_user_turn_oz = f"<|im_start|>user\n<tool_response>\n{json.dumps(initial_oz_tool_response_dict, indent=2)}\n</tool_response>\n<|im_end|>"
+    result_parts.append(initial_user_turn_oz)
+
+
+    # --- <<< STEP 2: Multi-Round Optimization (Using analyze_autophase) >>> ---
+
+    # --- Pad and Distribute the provided 'good' sequence for simulation guidance ---
+    full_pass_sequence_for_sim = list(pass_sequence)
+    total_rounds = 5
+    # (Padding/Distribution logic remains the same as previous version)
+    if len(full_pass_sequence_for_sim) < total_rounds:
+        padding_pass = full_pass_sequence_for_sim[-1] if full_pass_sequence_for_sim else "--instcombine"
+        while len(full_pass_sequence_for_sim) < total_rounds: full_pass_sequence_for_sim.append(padding_pass)
+    n_passes = len(full_pass_sequence_for_sim)
+    passes_per_round = max(1, (n_passes + total_rounds - 1) // total_rounds)
+    assigned_passes_per_round: List[List[str]] = []
+    current_start_index = 0
+    for i in range(total_rounds):
+        current_end_index = min(current_start_index + passes_per_round, n_passes)
+        round_passes = full_pass_sequence_for_sim[current_start_index:current_end_index]
+        if not round_passes and current_start_index < n_passes: round_passes = [full_pass_sequence_for_sim[current_start_index]]; current_end_index += 1
+        elif not round_passes: round_passes = [full_pass_sequence_for_sim[-1]]
+        assigned_passes_per_round.append(round_passes)
+        current_start_index = current_end_index
+        if current_start_index >= n_passes and i < total_rounds - 1:
+             for j in range(i + 1, total_rounds): assigned_passes_per_round.append([full_pass_sequence_for_sim[-1]])
+             break
+
+    # --- State Variables for the multi-round part ---
+    # Analysis text starts from the *result* of the -Oz check
+    previous_analysis_text = initial_oz_tool_response_dict["feature_analysis"]
+    previous_round_passes_added: List[str] = ['-Oz'] # conceptually, the first "previous" step was Oz
+    # Features start from the *original* code before the first optimization round (after Oz check)
     current_features = initial_autophase
-    current_inst_count = initial_autophase.get('TotalInsts', 'N/A')
-    cumulative_passes: List[str] = []
+    current_inst_count_sequence = _safe_get_inst_count(initial_autophase)
+    cumulative_passes_agent: List[str] = [] # Track passes agent adds *during the 5 rounds*
+    final_round_tool_response: Optional[Dict] = None # Store the *entire* tool response dict from the last round
 
-    # --- Loop Through Rounds ---
+    # --- Loop Through Optimization Rounds 1 to 5 ---
     for round_idx in range(total_rounds):
-        round_num = round_idx + 1
-        current_round_new_passes = assigned_passes_per_round[round_idx]
-        cumulative_passes.extend(current_round_new_passes)
-        all_passes_so_far = list(cumulative_passes)
+        round_num_display = round_idx + 1
+        current_round_new_passes_agent = assigned_passes_per_round[round_idx]
+        cumulative_passes_agent.extend(current_round_new_passes_agent)
+        all_passes_agent_so_far = list(cumulative_passes_agent)
 
-        # --- 1. Generate DETAILED Thinking with Descriptions ---
+        # --- 1. Generate Thinking ---
         thinking_lines = ["<think>"]
-        thinking_lines.append(f"[Round {round_num}/{total_rounds}]")
+        thinking_lines.append(f"[Optimization Round {round_num_display}/{total_rounds}]")
+        current_inst_str = str(current_inst_count_sequence) if current_inst_count_sequence is not None else "N/A"
+        oz_count_str = str(oz_inst_count_from_tool) if oz_inst_count_from_tool is not None else "N/A"
 
         if round_idx == 0:
-            thinking_lines.append("- Initial State: Starting optimization analysis.")
-            thinking_lines.append(f"- Initial InstCount: {current_inst_count}.")
-            thinking_lines.append("- Goal: Minimize instruction count.")
-            # thinking_lines.append(f"- Plan (Round 1): Apply the first batch of passes: {json.dumps(current_round_new_passes)}.") # Replaced by list below
-            thinking_lines.append(f"- Plan (Round 1): Applying the following initial passes:{current_round_new_passes}")
-            for p in current_round_new_passes:
-                desc = PASS_DESCRIPTIONS.get(p, "General optimization pass.") # Lookup or default
-                thinking_lines.append(f"  - {p}: {desc}")
-            thinking_lines.append(f"- Cumulative: Tool call will use these {len(all_passes_so_far)} initial passes.")
+            thinking_lines.append(f"- State: After checking -Oz baseline (Result: {oz_count_str} instructions).")
+            thinking_lines.append(f"- Current Code InstCount (Original): {current_inst_str}.") # Still original before this round
+            thinking_lines.append("- Goal: Start building a custom sequence to try and beat the -Oz baseline.")
+            thinking_lines.append(f"- Plan (Round 1): Apply initial custom pass(es): {current_round_new_passes_agent}")
+            for p in current_round_new_passes_agent: thinking_lines.append(f"  - {p}: {PASS_DESCRIPTIONS.get(p, DEFAULT_PASS_DESC)}")
+            thinking_lines.append("- Cumulative: Tool call will use these passes.")
         else:
-            thinking_lines.append(f"- Recap: Round {round_idx} added passes: {json.dumps(previous_round_passes)}.")
-            thinking_lines.append(f"- Result (after Round {round_idx}): {previous_analysis_text}")
-            thinking_lines.append(f"- Current InstCount: {current_inst_count}.")
-            thinking_lines.append("- Goal: Continue minimizing instruction count.")
-            reasoning = "Based on the previous results, proceeding with the next optimization phase."
-            if "decreased" in previous_analysis_text: reasoning = "Positive results observed. Continuing with the planned sequence to further optimize."
-            elif "increased" in previous_analysis_text: reasoning = "Instruction count increased. Proceeding cautiously with the next planned passes."
-            elif "unchanged" in previous_analysis_text: reasoning = "No significant change observed. Applying the next set of passes."
-            elif "Error" in previous_analysis_text or "无法" in previous_analysis_text: reasoning = "Previous step encountered an error. Attempting the next passes."
+            thinking_lines.append(f"- Recap: Round {round_idx} added passes: {previous_round_passes_added}.")
+            thinking_lines.append(f"- Result (Analysis after Round {round_idx}): {previous_analysis_text}")
+            thinking_lines.append(f"- Current InstCount (Sequence): {current_inst_str}.")
+            thinking_lines.append(f"- Baseline InstCount (-Oz): {oz_count_str}.")
+            thinking_lines.append("- Goal: Continue building the optimization sequence.")
+            reasoning = "Proceeding to the next optimization step." # Basic reasoning simulation
+            if "decreased" in previous_analysis_text: reasoning = "Improvement seen. Adding next passes."
+            elif "increased" in previous_analysis_text: reasoning = "Regression seen. Adding next planned passes."
+            elif "unchanged" in previous_analysis_text: reasoning = "No change. Trying next passes."
+            elif "Error" in previous_analysis_text or "error" in previous_analysis_text: reasoning = "Previous step had issues. Attempting next passes."
+            thinking_lines.append(f"- Plan (Round {round_num_display}): {reasoning} Add passes: {current_round_new_passes_agent}")
+            for p in current_round_new_passes_agent: thinking_lines.append(f"  - {p}: {PASS_DESCRIPTIONS.get(p, DEFAULT_PASS_DESC)}")
+            thinking_lines.append(f"- Cumulative: Tool call uses all {len(all_passes_agent_so_far)} passes accumulated in this sequence.")
 
-            # thinking_lines.append(f"- Plan (Round {round_num}): {reasoning} Adding passes: {json.dumps(current_round_new_passes)}.") # Replaced by list below
-            thinking_lines.append(f"- Plan (Round {round_num}): {reasoning} Adding the following passes:{current_round_new_passes}")
-            for p in current_round_new_passes:
-                desc = PASS_DESCRIPTIONS.get(p, "General optimization pass.") # Lookup or default
-                thinking_lines.append(f"  - {p}: {desc}")
-            thinking_lines.append(f"- Cumulative: Tool call will use all {len(all_passes_so_far)} passes accumulated so far.")
-
-        thinking_lines.append(f"\nTool call uses ALL passes applied up to the end of this round.") # Required ending line
+        thinking_lines.append("\nTool call analyzes the effect of applying the *cumulative* sequence generated so far (compared to previous round's state).")
         thinking_lines.append("</think>")
         thinking_content = "\n".join(thinking_lines)
 
-        # --- 2. Generate Tool Call ---
-        tool_call_args = {"filename": filename, "optimization_passes": all_passes_so_far}
+        # --- 2. Generate Tool Call (Using analyze_autophase) ---
+        tool_call_args = {"filename": filename, "optimization_passes": all_passes_agent_so_far}
         tool_call_content = json.dumps({"name": "analyze_autophase", "arguments": tool_call_args}, separators=(',', ':'))
         tool_call_str = f"<tool_call>\n{tool_call_content}\n</tool_call>"
 
         # --- 3. Simulate Tool Execution & Prepare Response ---
         tool_response_content_dict = {"status": "error", "feature_analysis": "Simulation error before execution"}
         feature_analysis_this_round = "Error: Simulation step failed"
-        optimized_features_this_round = None
+        optimized_features_this_round_sim = None
         try:
-            optimized_code_this_round = GenerateOptimizedLLCode(original_ll_code, all_passes_so_far, llvm_tools_path=llvm_tools_path)
-            if optimized_code_this_round is None: raise ValueError("GenerateOptimizedLLCode returned None")
-            optimized_features_this_round = get_autophase_features(optimized_code_this_round)
-            if optimized_features_this_round is None: raise ValueError("get_autophase_features returned None")
-            feature_analysis_this_round = analyze_feature_changes(current_features, optimized_features_this_round)
-            tool_response_content_dict["status"] = "success"; tool_response_content_dict["feature_analysis"] = feature_analysis_this_round
-            new_inst_count = optimized_features_this_round.get("TotalInsts")
-            if new_inst_count is not None: tool_response_content_dict["current_total_insts"] = new_inst_count
-        except Exception as e:
-            error_message = f"Error during simulation round {round_num}: {str(e)}"; print(f"Error details for {filename}, round {round_num}: {e}")
-            feature_analysis_this_round = error_message; tool_response_content_dict["feature_analysis"] = error_message
+            optimized_code_this_round_sim = GenerateOptimizedLLCode(original_ll_code, all_passes_agent_so_far, llvm_tools_path)
+            if optimized_code_this_round_sim is None: raise ValueError(f"GenerateOptimizedLLCode failed for sequence: {all_passes_agent_so_far}")
 
-        # --- Update State for NEXT Iteration's Think Block ---
+            optimized_features_this_round_sim = get_autophase_features(optimized_code_this_round_sim)
+            if optimized_features_this_round_sim is None: raise ValueError("get_autophase_features failed")
+
+            # Compare features from *this* round simulation vs features from *previous* round state
+            feature_analysis_this_round = analyze_feature_changes(current_features, optimized_features_this_round_sim)
+            tool_response_content_dict["status"] = "success"
+            tool_response_content_dict["feature_analysis"] = feature_analysis_this_round
+
+            new_inst_count_sim = _safe_get_inst_count(optimized_features_this_round_sim)
+            if new_inst_count_sim is not None:
+                 tool_response_content_dict["current_total_insts"] = new_inst_count_sim
+                 current_inst_count_sequence = new_inst_count_sim # Update sequence count state
+            else:
+                 feature_analysis_this_round += " (Warning: Could not extract TotalInsts count from tool result)"
+                 tool_response_content_dict["feature_analysis"] = feature_analysis_this_round
+                 # Mark status as error if essential count is missing
+                 tool_response_content_dict["status"] = "error"
+
+        except Exception as e:
+            error_message = f"Error during simulation round {round_num_display}: {str(e)}"
+            print(f"Error details for {filename}, round {round_num_display}: {e}")
+            feature_analysis_this_round = error_message
+            tool_response_content_dict["feature_analysis"] = error_message
+            tool_response_content_dict["status"] = "error"
+            optimized_features_this_round_sim = None
+
+        # Store the *entire response dictionary* for the last round
+        if round_idx == total_rounds - 1:
+            final_round_tool_response = tool_response_content_dict
+
+        # --- Update State for NEXT Iteration ---
         previous_analysis_text = feature_analysis_this_round
-        previous_round_passes = current_round_new_passes
-        if optimized_features_this_round:
-            current_features = optimized_features_this_round
-            current_inst_count = optimized_features_this_round.get('TotalInsts', current_inst_count)
+        previous_round_passes_added = current_round_new_passes_agent
+        if optimized_features_this_round_sim and tool_response_content_dict["status"] == "success":
+            # Only update features if the round was successful AND features were obtained
+            current_features = optimized_features_this_round_sim
 
         # --- Assemble Turn Strings ---
         assistant_turn = f"<|im_start|>assistant\n{thinking_content}\n{tool_call_str}\n<|im_end|>"
@@ -402,11 +479,78 @@ def generate_thinking_process(filename: str, initial_autophase: Dict, pass_seque
         result_parts.append(assistant_turn)
         result_parts.append(user_turn)
 
-    # --- 4. Final Answer ---
-    # Ensure final answer is correct JSON format
-    final_assistant_answer = f"<|im_start|>assistant\n<answer>\n{full_pass_sequence}\n</answer>\n<|im_end|>"
-    result_parts.append(final_assistant_answer)
+
+    # --- <<< STEP 3: Final Assistant Turn - Comparison and Answer >>> ---
+    final_answer_sequence = cumulative_passes_agent # Default: use the sequence built over 5 rounds
+    final_decision_reasoning = ""
+
+    # Get the final sequence instruction count from the LAST tool response
+    final_sequence_inst_count_from_tool: Optional[int] = None
+    if final_round_tool_response and final_round_tool_response.get("status") == "success":
+        final_sequence_inst_count_from_tool = final_round_tool_response.get("current_total_insts")
+        # If key exists but value is not int (e.g., None), _safe_get_inst_count handles it too
+        if final_sequence_inst_count_from_tool is None:
+             # Attempt to re-parse from features if key was missing but analysis seemed ok
+             # This part is less likely needed if response dict is built correctly
+             pass # For simplicity, rely on current_total_insts key
+
+    final_think_lines = ["<think>", "[Final Decision]"]
+    final_think_lines.append(f"- Completed {total_rounds} optimization rounds.")
+    seq_count_str = str(final_sequence_inst_count_from_tool) if final_sequence_inst_count_from_tool is not None else "N/A (Error or missing)"
+    oz_count_str = str(oz_inst_count_from_tool) if oz_inst_count_from_tool is not None else "N/A (Error or missing)"
+    final_think_lines.append(f"- Final InstCount (Result of {total_rounds}-Round Sequence): {seq_count_str}.")
+    final_think_lines.append(f"- Baseline InstCount (Result of Initial -Oz): {oz_count_str}.")
+
+    comparison_possible = (oz_inst_count_from_tool is not None and final_sequence_inst_count_from_tool is not None)
+
+    if comparison_possible:
+        if oz_inst_count_from_tool < final_sequence_inst_count_from_tool:
+            final_answer_sequence = ['-Oz']
+            final_decision_reasoning = f"- Comparison: Initial '-Oz' ({oz_count_str}) resulted in fewer instructions than the final multi-round sequence ({seq_count_str})."
+            final_think_lines.append(final_decision_reasoning)
+            final_think_lines.append("- Conclusion: Selecting '-Oz' as the final answer.")
+        else:
+            final_decision_reasoning = f"- Comparison: The multi-round sequence ({seq_count_str}) resulted in fewer or equal instructions compared to initial '-Oz' ({oz_count_str})."
+            final_think_lines.append(final_decision_reasoning)
+            final_think_lines.append("- Conclusion: Selecting the multi-round sequence as the final answer.")
+            # final_answer_sequence already defaults to cumulative_passes_agent
+            if not final_answer_sequence: # Ensure it's not empty if chosen
+                 final_answer_sequence = ["--instcombine"] # Fallback
+    # Handle cases where comparison isn't possible
+    elif oz_inst_count_from_tool is None:
+         final_decision_reasoning = "- Comparison Failed: Could not determine baseline count from the initial -Oz tool call."
+         final_think_lines.append(final_decision_reasoning)
+         final_think_lines.append("- Conclusion: Using the result of the multi-round sequence attempt.")
+         if not final_answer_sequence: final_answer_sequence = ["--instcombine"] # Fallback
+    elif final_sequence_inst_count_from_tool is None:
+         final_decision_reasoning = "- Comparison Failed: Could not determine final count from the multi-round sequence's last step."
+         final_think_lines.append(final_decision_reasoning)
+         if oz_inst_count_from_tool is not None:
+             final_think_lines.append("- Conclusion: Defaulting to '-Oz' as its baseline count is known.")
+             final_answer_sequence = ['-Oz']
+         else:
+             final_think_lines.append("- Conclusion: Both initial -Oz and final sequence steps failed to provide counts. Cannot determine the best option.")
+             final_answer_sequence = ["-Oz"] # Default to Oz maybe? Or keep sequence? Let's default to Oz here.
+    else:
+        final_decision_reasoning = "- Comparison Status Uncertain."
+        final_think_lines.append(final_decision_reasoning)
+        final_think_lines.append("- Conclusion: Defaulting to the multi-round sequence attempt.")
+        if not final_answer_sequence: final_answer_sequence = ["--instcombine"] # Fallback
+
+    final_think_lines.append("</think>")
+    final_thinking_content = "\n".join(final_think_lines)
+
+    # Assemble final assistant response
+    final_assistant_answer_parts = [
+        "<|im_start|>assistant",
+        final_thinking_content,
+        f"<answer>\n{final_answer_sequence}\n</answer>", # Use the determined sequence
+        "<|im_end|>"
+    ]
+    result_parts.append("\n".join(final_assistant_answer_parts))
+
     return "\n".join(result_parts)
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -485,49 +629,84 @@ def main():
             over_oz = float(row['OverOz'])
             
             # 为SFT构造问题和答案
-            question = f"""Act as a compiler optimization expert simulating the process of finding an optimal pass sequence for LLVM IR, aiming to reduce the total instruction count. Generate a response simulating this process using `<think>`, `<tool_call>`, and `<tool_response>` interactions.
+            question = f"""Act as a compiler optimization expert finding an optimal pass sequence for LLVM IR, aiming to reduce the total instruction count. You will interact with a analysis tool.
 
-**Follow these STRICT formatting requirements:**
+**Follow this EXACT Structure and Formatting Requirements:**
 
-1.  **Exactly 5 Rounds:**
-    *   Generate exactly 5 rounds. Each round consists of:
-        *   An assistant turn: `<|im_start|>assistant\\n<think>...</think>\\n<tool_call>...</tool_call>\\n<|im_end|>`
-        *   Followed immediately by a user turn (you receive this): `<|im_start|>user\\n<tool_response>...</tool_response>\\n<|im_end|>`
-    *   **Crucially:** Generating more or fewer than 5 rounds is a major format error.
+It involves **three distinct phases**: an Initial Baseline Check, exactly 5 Optimization Rounds, and a Final Decision. The total interaction MUST consist of exactly 13 turns in the following sequence:
 
-2.  **Think Block (`<think>...</think>`) Content:**
-    *   **Required Elements:** Each think block MUST contain:
-        *   A round marker: `[Round N/5]`
-        *   Recap/Initial state information (mentioning passes added previously).
-        *   Current instruction count.
-        *   A plan line stating: `... Adding the following passes:['--newPassA', '--newPassB']` (Use **Python list literal** for new passes).
-        *   Descriptions for the *new* passes (`- --pass: desc`).
-        *   A statement about the cumulative passes for the upcoming tool call.
-        *   **Exact Ending:** The think block MUST end with the line `\\nTool call uses ALL passes applied up to the end of this round.`
+**Phase 1: Initial Baseline Check (Turns 1-2)**
 
-3.  **Tool Call (`<tool_call>...</tool_call>`) Content:**
-    *   Must contain valid JSON: `{{"name": "analyze_autophase", "arguments": {{"filename": "...", "optimization_passes": ["--pass1", ...]}}}}`.
-    *   **Accumulation Rule:** The `"optimization_passes"` JSON list MUST be the passes from the *previous* tool call + the *new* passes listed in the current round's *think block plan*. Order matters.
+1.  **Turn 1 (Assistant): Baseline Setup**
+    *   Format: `<|im_start|>assistant\\n<think>...</think>\\n<tool_call>...</tool_call>\\n<|im_end|>`
+    *   `<think>` Content:
+        *   Must start with the marker: `[Initial Baseline Check]`
+        *   Must include a plan mentioning the goal is to establish a baseline using `-Oz`. Use Python list literal format for the pass: `['-Oz']`.
+    *   `<tool_call>` Content:
+        *   Valid JSON: `{{"name": "analyze_autophase", "arguments": {{"filename": filename, "optimization_passes": ["-Oz"]}}}}` (Use **JSON list** for passes).
 
-4.  **Final Answer Block (CRITICAL):**
-    *   **Position:** Appears IMMEDIATELY after the 5th round's user turn (`<tool_response>`).
-    *   **Structure:** MUST be a single, final assistant turn: `<|im_start|>assistant\\n<answer>...</answer>\\n<|im_end|>`.
-    *   **Content:** This block contains ONLY the `<answer>` tag. NO `<think>`, NO `<tool_call>`, NO extra text.
-    *   **Answer Format:** Inside `<answer>`, provide the final accumulated pass list (matching the 5th tool call) as a **Python list literal** string (e.g., `['--pass1', '--pass2']`).
+2.  **Turn 2 (User): Baseline Response**
+    *   Format: `<|im_start|>user\\n<tool_response>...</tool_response>\\n<|im_end|>`
+    *   (You will receive this response, containing the instruction count after applying `-Oz`).
+
+**Phase 2: Optimization Rounds (Turns 3-12)**
+
+*   This phase consists of **exactly 5 Optimization Rounds**. Each round is 2 turns (Assistant then User).
+
+3.  **Turns 3, 5, 7, 9, 11 (Assistant): Optimization Round N**
+    *   Format: `<|im_start|>assistant\\n<think>...</think>\\n<tool_call>...</tool_call>\\n<|im_end|>`
+    *   `<think>` Content (**ALL elements below are REQUIRED**):
+        *   **Round Marker:** `[Optimization Round N/5]` (where N is 1 to 5).
+        *   **State/Recap:**
+            *   For Round 1: `Initial State:` mentioning the result (instruction count) from the Baseline Check.
+            *   For Rounds 2-5: `Recap:` mentioning the passes *added* in the *previous* round's plan (use **Python list literal**). Must also include `Result:` mentioning the analysis outcome from the previous round (e.g., "Total InstCount decreased by X").
+        *   **Counts:**
+            *   `Current InstCount (Sequence):` showing the count *before* applying this round's new passes.
+            *   For Rounds 2-5: `Baseline InstCount (-Oz):` showing the count achieved in the initial baseline check.
+        *   **Plan:** Must include a line like `Plan (Round N): Add passes: ['--newPassA', '--newPassB', ...]` specifying the *new* passes to add in this round (use **Python list literal**). Optimization level flags (e.g., `-Oz`) can be included here alongside specific passes if desired.
+        *   **Descriptions:** Provide brief descriptions for ONLY the *new* passes added in the Plan section (e.g., `- --pass: Description.`).
+        *   **Cumulative Statement:** Mention the upcoming tool call uses the accumulated sequence.
+        *   **EXACT Ending:** The think block MUST end *exactly* with the line: `\\nTool call analyzes the effect of applying the *cumulative* sequence generated so far (compared to previous round's state).` (Include the asterisk formatting).
+    *   `<tool_call>` Content:
+        *   Valid JSON: `{{"name": "analyze_autophase", "arguments": {{"filename": filename, "optimization_passes": [...]}}}}`.
+        *   **Accumulation Rule:** The `"optimization_passes"` **JSON list** MUST contain *all* passes from the `Plan:` sections of Optimization Rounds 1 through N, concatenated in order. The baseline `-Oz` is NOT included in this accumulation unless explicitly added again in an optimization round's plan.
+
+4.  **Turns 4, 6, 8, 10, 12 (User): Optimization Response N**
+    *   Format: `<|im_start|>user\\n<tool_response>...</tool_response>\\n<|im_end|>`
+    *   (You will receive this response, containing the instruction count after applying the cumulative passes up to round N).
+
+**Phase 3: Final Decision (Turn 13)**
+
+5.  **Turn 13 (Assistant): Final Decision and Answer**
+    *   **Position:** MUST appear IMMEDIATELY after the 5th optimization round's user turn (Turn 12).
+    *   **Format:** `<|im_start|>assistant\\n<think>...</think>\\n<answer>...</answer>\\n<|im_end|>`
+    *   **CRITICAL:** This block contains BOTH `<think>` and `<answer>`. NO `<tool_call>`.
+    *   `<think>` Content (**ALL elements below are REQUIRED**):
+        *   **Marker:** `[Final Decision]`
+        *   **Counts Mention:** State the `Final InstCount (Result of 5-Round Sequence):` (from Turn 12 response) AND the `Baseline InstCount (Result of Initial -Oz):` (from Turn 2 response).
+        *   **Comparison:** Include a `Comparison:` line explicitly comparing the two counts and stating which is better (lower).
+        *   **Conclusion:** Include a `Conclusion:` line stating the final choice based on the comparison.
+    *   `<answer>` Content:
+        *   Contains ONLY the final chosen pass sequence.
+        *   **Logic:**
+            *   If Baseline InstCount <= Final Sequence InstCount, the answer MUST be `['-Oz']`.
+            *   If Final Sequence InstCount < Baseline InstCount, the answer MUST be the full accumulated list of passes from the 5th optimization round's `<tool_call>`.
+        *   **Format:** Use **Python list literal** string format inside `<answer>` (e.g., `['-Oz']` or `['--pass1', '--pass2', ...]`).
     *   **Absolute End:** NO content or blocks whatsoever after this final assistant turn.
 
-**Key Format Distinction:**
-*   **Tool Call Args (`optimization_passes`): Use JSON List** `["--pass1", "--pass2"]`
-*   **Think Block (Plan/Recap) & Final Answer Block (`<answer>`): Use Python List Literal** `['--pass1', '--pass2']`
+**Formatting Recap (JSON vs. Python List Literal):**
+*   `<tool_call>` -> `optimization_passes`: **JSON List** `["--pass1", "-Oz"]`
+*   `<think>` (Plan/Recap) -> Pass lists: **Python List Literal** `['--pass1', '-Oz']`
+*   `<answer>` -> Final pass list: **Python List Literal** `['--pass1', '-Oz']`
 
-Focus on achieving the correct 5-round structure, the precise final answer block format and position, and the correct pass accumulation in tool calls. Use standard pass descriptions or "General optimization pass."
+Adhere strictly to the markers, required text, endings, accumulation logic, and final answer determination. Use standard pass descriptions or "General optimization pass." if unsure.
+
 Filename for tool call reference: {filename}
 The LLVM IR code is represented by autophase features, the initial autophase features are:
 ```json
 {formatted_features}
 ```
-Initial instruction count: {initial_inst_count}
-
+Initial instruction count (before baseline): {initial_inst_count}
 """
             
             # 生成思考过程和工具调用

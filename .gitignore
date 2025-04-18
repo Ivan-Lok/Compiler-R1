@@ -3,7 +3,7 @@ wandb/
 __pycache__/
 data/
 ignore/
-checkpoints/
+checkpoint*/
 .history/
 envs/
 llvmir_datasets/

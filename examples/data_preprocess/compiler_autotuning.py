@@ -232,43 +232,77 @@ if __name__ == '__main__':
         print(f"Validation dataset '{val_name}': {len(val_dataset)} samples")
     
     # Instruction template
-    instruction_following = f"""Act as a compiler optimization expert simulating the process of finding an optimal pass sequence for LLVM IR, aiming to reduce the total instruction count. Generate a response simulating this process using `<think>`, `<tool_call>`, and `<tool_response>` interactions.
+    instruction_following = f"""Act as a compiler optimization expert finding an optimal pass sequence for LLVM IR, aiming to reduce the total instruction count. You will interact with a analysis tool.
 
-**Follow these STRICT formatting requirements:**
+**Follow this EXACT Structure and Formatting Requirements:**
 
-1.  **Exactly 5 Rounds:**
-    *   Generate exactly 5 rounds. Each round consists of:
-        *   An assistant turn: `<|im_start|>assistant\\n<think>...</think>\\n<tool_call>...</tool_call>\\n<|im_end|>`
-        *   Followed immediately by a user turn (you receive this): `<|im_start|>user\\n<tool_response>...</tool_response>\\n<|im_end|>`
-    *   **Crucially:** Generating more or fewer than 5 rounds is a major format error.
+It involves **three distinct phases**: an Initial Baseline Check, exactly 5 Optimization Rounds, and a Final Decision. The total interaction MUST consist of exactly 13 turns in the following sequence:
 
-2.  **Think Block (`<think>...</think>`) Content:**
-    *   **Required Elements:** Each think block MUST contain:
-        *   A round marker: `[Round N/5]`
-        *   Recap/Initial state information (mentioning passes added previously).
-        *   Current instruction count.
-        *   A plan line stating: `... Adding the following passes:['--newPassA', '--newPassB']` (Use **Python list literal** for new passes).
-        *   Descriptions for the *new* passes (`- --pass: desc`).
-        *   A statement about the cumulative passes for the upcoming tool call.
-        *   **Exact Ending:** The think block MUST end with the line `\\nTool call uses ALL passes applied up to the end of this round.`
+**Phase 1: Initial Baseline Check (Turns 1-2)**
 
-3.  **Tool Call (`<tool_call>...</tool_call>`) Content:**
-    *   Must contain valid JSON: `{{"name": "analyze_autophase", "arguments": {{"filename": "...", "optimization_passes": ["--pass1", ...]}}}}`.
-    *   **Accumulation Rule:** The `"optimization_passes"` JSON list MUST be the passes from the *previous* tool call + the *new* passes listed in the current round's *think block plan*. Order matters.
+1.  **Turn 1 (Assistant): Baseline Setup**
+    *   Format: `<|im_start|>assistant\\n<think>...</think>\\n<tool_call>...</tool_call>\\n<|im_end|>`
+    *   `<think>` Content:
+        *   Must start with the marker: `[Initial Baseline Check]`
+        *   Must include a plan mentioning the goal is to establish a baseline using `-Oz`. Use Python list literal format for the pass: `['-Oz']`.
+    *   `<tool_call>` Content:
+        *   Valid JSON: `{{"name": "analyze_autophase", "arguments": {{"filename": filename, "optimization_passes": ["-Oz"]}}}}` (Use **JSON list** for passes).
 
-4.  **Final Answer Block (CRITICAL):**
-    *   **Position:** Appears IMMEDIATELY after the 5th round's user turn (`<tool_response>`).
-    *   **Structure:** MUST be a single, final assistant turn: `<|im_start|>assistant\\n<answer>...</answer>\\n<|im_end|>`.
-    *   **Content:** This block contains ONLY the `<answer>` tag. NO `<think>`, NO `<tool_call>`, NO extra text.
-    *   **Answer Format:** Inside `<answer>`, provide the final accumulated pass list (matching the 5th tool call) as a **Python list literal** string (e.g., `['--pass1', '--pass2']`).
+2.  **Turn 2 (User): Baseline Response**
+    *   Format: `<|im_start|>user\\n<tool_response>...</tool_response>\\n<|im_end|>`
+    *   (You will receive this response, containing the instruction count after applying `-Oz`).
+
+**Phase 2: Optimization Rounds (Turns 3-12)**
+
+*   This phase consists of **exactly 5 Optimization Rounds**. Each round is 2 turns (Assistant then User).
+
+3.  **Turns 3, 5, 7, 9, 11 (Assistant): Optimization Round N**
+    *   Format: `<|im_start|>assistant\\n<think>...</think>\\n<tool_call>...</tool_call>\\n<|im_end|>`
+    *   `<think>` Content (**ALL elements below are REQUIRED**):
+        *   **Round Marker:** `[Optimization Round N/5]` (where N is 1 to 5).
+        *   **State/Recap:**
+            *   For Round 1: `Initial State:` mentioning the result (instruction count) from the Baseline Check.
+            *   For Rounds 2-5: `Recap:` mentioning the passes *added* in the *previous* round's plan (use **Python list literal**). Must also include `Result:` mentioning the analysis outcome from the previous round (e.g., "Total InstCount decreased by X").
+        *   **Counts:**
+            *   `Current InstCount (Sequence):` showing the count *before* applying this round's new passes.
+            *   For Rounds 2-5: `Baseline InstCount (-Oz):` showing the count achieved in the initial baseline check.
+        *   **Plan:** Must include a line like `Plan (Round N): Add passes: ['--newPassA', '--newPassB', ...]` specifying the *new* passes to add in this round (use **Python list literal**). Optimization level flags (e.g., `-Oz`) can be included here alongside specific passes if desired.
+        *   **Descriptions:** Provide brief descriptions for ONLY the *new* passes added in the Plan section (e.g., `- --pass: Description.`).
+        *   **Cumulative Statement:** Mention the upcoming tool call uses the accumulated sequence.
+        *   **EXACT Ending:** The think block MUST end *exactly* with the line: `\\nTool call analyzes the effect of applying the *cumulative* sequence generated so far (compared to previous round's state).` (Include the asterisk formatting).
+    *   `<tool_call>` Content:
+        *   Valid JSON: `{{"name": "analyze_autophase", "arguments": {{"filename": filename, "optimization_passes": [...]}}}}`.
+        *   **Accumulation Rule:** The `"optimization_passes"` **JSON list** MUST contain *all* passes from the `Plan:` sections of Optimization Rounds 1 through N, concatenated in order. The baseline `-Oz` is NOT included in this accumulation unless explicitly added again in an optimization round's plan.
+
+4.  **Turns 4, 6, 8, 10, 12 (User): Optimization Response N**
+    *   Format: `<|im_start|>user\\n<tool_response>...</tool_response>\\n<|im_end|>`
+    *   (You will receive this response, containing the instruction count after applying the cumulative passes up to round N).
+
+**Phase 3: Final Decision (Turn 13)**
+
+5.  **Turn 13 (Assistant): Final Decision and Answer**
+    *   **Position:** MUST appear IMMEDIATELY after the 5th optimization round's user turn (Turn 12).
+    *   **Format:** `<|im_start|>assistant\\n<think>...</think>\\n<answer>...</answer>\\n<|im_end|>`
+    *   **CRITICAL:** This block contains BOTH `<think>` and `<answer>`. NO `<tool_call>`.
+    *   `<think>` Content (**ALL elements below are REQUIRED**):
+        *   **Marker:** `[Final Decision]`
+        *   **Counts Mention:** State the `Final InstCount (Result of 5-Round Sequence):` (from Turn 12 response) AND the `Baseline InstCount (Result of Initial -Oz):` (from Turn 2 response).
+        *   **Comparison:** Include a `Comparison:` line explicitly comparing the two counts and stating which is better (lower).
+        *   **Conclusion:** Include a `Conclusion:` line stating the final choice based on the comparison.
+    *   `<answer>` Content:
+        *   Contains ONLY the final chosen pass sequence.
+        *   **Logic:**
+            *   If Baseline InstCount <= Final Sequence InstCount, the answer MUST be `['-Oz']`.
+            *   If Final Sequence InstCount < Baseline InstCount, the answer MUST be the full accumulated list of passes from the 5th optimization round's `<tool_call>`.
+        *   **Format:** Use **Python list literal** string format inside `<answer>` (e.g., `['-Oz']` or `['--pass1', '--pass2', ...]`).
     *   **Absolute End:** NO content or blocks whatsoever after this final assistant turn.
 
-**Key Format Distinction:**
-*   **Tool Call Args (`optimization_passes`): Use JSON List** `["--pass1", "--pass2"]`
-*   **Think Block (Plan/Recap) & Final Answer Block (`<answer>`): Use Python List Literal** `['--pass1', '--pass2']`
+**Formatting Recap (JSON vs. Python List Literal):**
+*   `<tool_call>` -> `optimization_passes`: **JSON List** `["--pass1", "-Oz"]`
+*   `<think>` (Plan/Recap) -> Pass lists: **Python List Literal** `['--pass1', '-Oz']`
+*   `<answer>` -> Final pass list: **Python List Literal** `['--pass1', '-Oz']`
 
-Focus on achieving the correct 5-round structure, the precise final answer block format and position, and the correct pass accumulation in tool calls. Use standard pass descriptions or "General optimization pass."
-
+Adhere strictly to the markers, required text, endings, accumulation logic, and final answer determination. Use standard pass descriptions or "General optimization pass." if unsure.
 """
 
     # 添加所有可用passes的信息到指令中
