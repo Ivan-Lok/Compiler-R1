@@ -241,40 +241,175 @@ def _save_debug_log(log_lines: List[str], solution: str, func_name: str):
 
 def compute_score_format(text):
     """
-    检查输入文本是否严格匹配以下格式：
-    <|im_start|>assistant
-    <answer>
-    ["--item1", "--item2", ...]
-    </answer>
-    <|im_end|>
-
-    其中：
-    - 必须只有一个 <|im_start|>assistant 块。
-    - <answer> 标签内必须包含一个 Python 列表格式的字符串。
-    - 该列表必须包含一个或多个字符串元素。
-    - 每个元素必须以 "--" 开头。
-    - 元素之间用 ", " (逗号加空格) 分隔。
-    - 各个主要部分（标签、列表）之间必须用换行符 '\n' 分隔。
-
+    检查输入文本是否满足以下格式要求:
+    1. 必须包含 <|im_start|>assistant ... <|im_end|> 格式
+    2. 必须包含 <answer> ... </answer> 标签或正确的工具调用<tool_call>...</tool_call>
+    3. <answer> 标签内必须包含有效的优化选项序列(列表或单个选项)
+    4. 如果包含工具调用，必须使用正确的工具且参数格式正确
+    
+    支持以下<answer>格式:
+    - 列表格式: ["--option1", "--option2", ...]
+    - Python列表: [--option1, --option2, ...]
+    - 单行格式: "--option1 --option2 ..."
+    - 多行格式: 每行一个选项
+    
+    支持的工具调用:
+    - rag_search: 用于检索相似的优化序列
+    - gen_autophase: 用于生成自动相位特征
+    - optimize_llcode: 用于优化LLVM IR代码
+    - count_instructions: 用于计算优化前后的指令数
+    
     Args:
         text: 需要检查格式的输入字符串。
 
     Returns:
-        如果字符串满足指定格式，则返回 True，否则返回 False。
+        格式评分: 10分(完全符合格式要求), 5分(基本符合但有小问题), 0分(部分符合), -10分(不符合)
     """
-    # 匹配一个或多个元素的模式
-    list_item_pattern = r'\"--[^\"]+\"'
-    list_pattern = r'\[' + list_item_pattern + r'(?:, ' + list_item_pattern + r')*' + r'\]'
-
-    # 完整模式
-    pattern = r'^<\|im_start\|>assistant\n<answer>\n' + list_pattern + r'\n</answer>\n<\|im_end\|>$'
-
-    # 使用 re.fullmatch 确保整个字符串都匹配模式
-    match = re.fullmatch(pattern, text)
-
-    if bool(match): return 10
-    else : return -10
+    debug_logs = []
+    debug_logs.append("开始检查格式...")
     
+    # 检查是否包含助手回复块
+    assistant_pattern = r'<\|im_start\|>assistant\s*(.*?)<\|im_end\|>'
+    assistant_match = re.search(assistant_pattern, text, re.DOTALL)
+    if not assistant_match:
+        debug_logs.append("格式错误: 不包含助手回复块")
+        # _save_debug_log(debug_logs, text, "compute_score_format")
+        return -10  # 不包含助手回复块
+    
+    assistant_content = assistant_match.group(1)
+    
+    # 检查是否包含tool_call标签
+    tool_call_pattern = r'<tool_call>\s*(.*?)\s*</tool_call>'
+    tool_call_match = re.search(tool_call_pattern, assistant_content, re.DOTALL)
+    
+    # 检查是否包含answer标签
+    answer_pattern = r'<answer>\s*(.*?)\s*</answer>'
+    answer_match = re.search(answer_pattern, assistant_content, re.DOTALL)
+    
+    # 如果两者都不存在，则格式不正确
+    if not tool_call_match and not answer_match:
+        debug_logs.append("格式错误: 既没有<tool_call>也没有<answer>标签")
+        # _save_debug_log(debug_logs, text, "compute_score_format")
+        return -5  # 不包含任何有效标签
+    
+    # 评分初始值
+    format_score = 0
+    
+    # 检查工具调用格式（如果存在）
+    if tool_call_match:
+        debug_logs.append("检测到<tool_call>标签")
+        tool_call_content = tool_call_match.group(1).strip()
+        
+        # 检查工具调用JSON格式
+        try:
+            tool_data = json.loads(tool_call_content)
+            tool_name = tool_data.get("name", "")
+            debug_logs.append(f"工具名称: {tool_name}")
+            
+            # 检查是否使用了支持的工具
+            supported_tools = ["rag_search", "gen_autophase", "optimize_llcode", "count_instructions"]
+            if tool_name in supported_tools:
+                format_score += 5
+                debug_logs.append(f"使用了支持的工具: {tool_name}")
+                
+                # 检查参数格式
+                arguments = tool_data.get("arguments", {})
+                if isinstance(arguments, dict):
+                    # 根据不同工具检查参数
+                    if tool_name == "rag_search":
+                        if "autophase_embedding" in arguments:
+                            format_score += 5
+                            debug_logs.append("rag_search工具参数格式正确")
+                        else:
+                            debug_logs.append("rag_search工具缺少必要参数: autophase_embedding")
+                    
+                    elif tool_name == "gen_autophase":
+                        if "optimization_passes" in arguments:
+                            format_score += 5
+                            debug_logs.append("gen_autophase工具参数格式正确")
+                        else:
+                            debug_logs.append("gen_autophase工具缺少必要参数: optimization_passes")
+                    
+                    elif tool_name == "optimize_llcode":
+                        if "ll_code" in arguments and "passes" in arguments:
+                            format_score += 5
+                            debug_logs.append("optimize_llcode工具参数格式正确")
+                        else:
+                            debug_logs.append("optimize_llcode工具缺少必要参数: ll_code或passes")
+                            
+                    elif tool_name == "count_instructions":
+                        if "filename" in arguments and "optimization_passes" in arguments:
+                            format_score += 5
+                            debug_logs.append("count_instructions工具参数格式正确")
+                        else:
+                            debug_logs.append("count_instructions工具缺少必要参数: filename或optimization_passes")
+                else:
+                    debug_logs.append("工具参数格式错误: 不是字典类型")
+            else:
+                debug_logs.append(f"使用了不支持的工具: {tool_name}")
+        except json.JSONDecodeError:
+            debug_logs.append("工具调用JSON格式解析失败")
+    
+    # 检查答案格式（如果存在）
+    if answer_match:
+        debug_logs.append("检测到<answer>标签")
+        answer_content = answer_match.group(1).strip()
+        
+        if not answer_content:
+            debug_logs.append("answer标签内容为空")
+            # _save_debug_log(debug_logs, text, "compute_score_format")
+            return -5  # answer标签内容为空
+        
+        # 检查优化选项格式
+        # 1. 检查JSON列表格式 ["--option1", "--option2", ...]
+        json_list_pattern = r'\[\s*(?:"[^"]*"|\'[^\']*\')(?:\s*,\s*(?:"[^"]*"|\'[^\']*\'))?\s*\]'
+        # 2. 检查Python列表表示 [--option1, --option2, ...]
+        python_list_pattern = r'\[\s*(?:--[a-zA-Z0-9-]+)(?:\s*,\s*(?:--[a-zA-Z0-9-]+))?\s*\]'
+        # 3. 检查单行格式 --option1 --option2 ...
+        single_line_pattern = r'(?:--[a-zA-Z0-9-]+)(?:\s+--[a-zA-Z0-9-]+)*'
+        # 4. 检查多行格式 (每行一个选项)
+        multi_line_pattern = r'(?:--[a-zA-Z0-9-]+\s*)+' 
+        
+        # 检查优化选项
+        has_valid_format = (
+            re.fullmatch(json_list_pattern, answer_content) is not None or
+            re.fullmatch(python_list_pattern, answer_content) is not None or
+            re.fullmatch(single_line_pattern, answer_content) is not None or
+            re.fullmatch(multi_line_pattern, answer_content) is not None or
+            "--" in answer_content.lower()  # 宽松检查，至少包含一个优化选项标识
+        )
+        
+        if has_valid_format:
+            # 检查是否至少包含一个以--开头的选项
+            if re.search(r'--[a-zA-Z0-9-]+', answer_content):
+                format_score = 10  # 完全符合answer格式要求
+                debug_logs.append("answer标签格式正确，包含有效的优化选项")
+            else:
+                format_score = 5  # 基本格式正确但没有明确的优化选项
+                debug_logs.append("answer标签格式基本正确，但没有明确的优化选项")
+        
+        # 格式不符合要求但可能是 -Oz 选项
+        elif "-Oz" in answer_content:
+            format_score = 10  # 特殊情况: -Oz 选项
+            debug_logs.append("answer标签包含特殊选项: -Oz")
+        else:
+            debug_logs.append("answer标签格式不符合要求")
+    
+    # 根据评分结果返回最终格式评分
+    if format_score >= 10:
+        final_score = 10
+    elif format_score >= 5:
+        final_score = 5
+    elif format_score > 0:
+        final_score = 0
+    else:
+        final_score = -10
+    
+    debug_logs.append(f"最终格式评分: {final_score}")
+    # if final_score < 5:
+    #     # _save_debug_log(debug_logs, text, "compute_score_format")
+    
+    return final_score
 
 def trace_agent_optimization_process(solution_str: str, ll_code: str) -> Tuple[List[str], float]:
     """Extract the final pass sequence from the answer tag and calculate overOz.

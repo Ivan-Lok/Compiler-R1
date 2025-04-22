@@ -73,10 +73,11 @@ if [ -f "$HOME/data/compiler_autotuning_sft/train.parquet" ] && \
         mkdir -p $HOME/data/compiler_autotuning_sft
         export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
         python3 -m examples.data_preprocess.compiler_autotuning_sft \
-          --data_file=examples/data_preprocess/train_random200max_LLM.csv \
+          --use_rag \
+          --data_file=examples/data_preprocess/compiler_autotuning_data.csv \
           --local_dir=$HOME/data/compiler_autotuning_sft \
           --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
-          --max_samples=8000
+          --max_samples=3000
     else
         echo "使用现有的SFT数据集继续..."
     fi
@@ -87,10 +88,11 @@ else
     mkdir -p $HOME/data/compiler_autotuning_sft
     export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
     python3 -m examples.data_preprocess.compiler_autotuning_sft \
+      --use_rag \
       --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
-      --data_file=examples/data_preprocess/train_random200max_LLM.csv \
+      --data_file=examples/data_preprocess/compiler_autotuning_data.csv \
       --local_dir=$HOME/data/compiler_autotuning_sft \
-      --max_samples=8000
+      --max_samples=3000
 fi
 
 # 检查SFT检查点是否存在

@@ -30,6 +30,7 @@ from typing import List, Dict, Optional, Any
 from agent_r1.tool.tools.comiler_autotuning.raw_tool.get_autophase import get_autophase_obs
 from agent_r1.tool.tools.comiler_autotuning.raw_tool.get_instrcount import GenerateOptimizedLLCode
 from agent_r1.tool.tools.comiler_autotuning.raw_tool.gen_pass_from_number import Actions_LLVM_10_0_0
+from agent_r1.tool.tools.comiler_autotuning.rag_search_tool import RAGSearchTool
 
 # LLVM优化pass的功能描述，帮助生成思考过程
 PASS_DESCRIPTIONS = {
@@ -551,6 +552,170 @@ def generate_thinking_process(filename: str, initial_autophase: Dict, pass_seque
 
     return "\n".join(result_parts)
 
+def generate_rag_based_sft(autophase_embedding: Dict, ground_truth_sequence: List[str], top_k: int = 3, rag_tool=None) -> str:
+    """
+    Generate SFT data using RAG search workflow:
+    1. Assistant turn: Explanation and RAG tool call
+    2. User turn: Simulated RAG tool response with top_k sequences
+    3. Assistant turn: Thinking process and final answer
+    
+    Args:
+        autophase_embedding: Autophase features dictionary
+        ground_truth_sequence: The known optimal sequence (from dataset)
+        top_k: Number of sequences to retrieve from RAG
+        rag_tool: Optional pre-initialized RAGSearchTool instance
+        
+    Returns:
+        Complete conversation string in SFT format
+    """
+    result_parts = []
+    
+    # --- Assistant Turn 1: Explanation and RAG tool call ---
+    thinking_lines = ["<think>"]
+    thinking_lines.append("[Initial Analysis]")
+    thinking_lines.append("- I have the autophase feature vector for an LLVM IR code.")
+    thinking_lines.append("- Need to find an optimal sequence of LLVM optimization passes to reduce instruction count.")
+    thinking_lines.append("- Step 1: Use RAG search to find similar code patterns and their effective optimization sequences.")
+    thinking_lines.append(f"- Will request top-{top_k} most similar optimization sequences from the database.")
+    thinking_lines.append("- These retrieved sequences will serve as starting points for my analysis.")
+    thinking_lines.append("</think>")
+    
+    # Create tool call for RAG search - use the dictionary directly
+    rag_tool_args = {
+        "autophase_embedding": autophase_embedding,  # Use the dictionary directly
+        "top_k": top_k
+    }
+    rag_tool_call = json.dumps({"name": "rag_search", "arguments": rag_tool_args}, separators=(',', ':'))
+    
+    # Combine thinking and tool call for assistant turn 1
+    assistant_turn_1 = [
+        "<|im_start|>assistant",
+        "\n".join(thinking_lines),
+        f"<tool_call>\n{rag_tool_call}\n</tool_call>",
+        "<|im_end|>"
+    ]
+    result_parts.append("\n".join(assistant_turn_1))
+    
+    # --- User Turn: Simulate RAG search tool response ---
+    
+    # Initialize RAG tool and actually execute it if possible
+    try:
+        # Use provided rag_tool instance if available, otherwise create a new one
+        local_rag_tool = rag_tool
+        if local_rag_tool is None:
+            from agent_r1.tool.tools.comiler_autotuning.rag_search_tool import RAGSearchTool
+            local_rag_tool = RAGSearchTool()
+            
+        # Execute RAG search to get similar sequences
+        tool_result = local_rag_tool.execute(rag_tool_args)
+        tool_result_obj = json.loads(tool_result)
+        
+        # Extract retrieved sequences
+        retrieved_sequences = []
+        if "results" in tool_result_obj and len(tool_result_obj["results"]) > 0:
+            for result in tool_result_obj["results"]:
+                sequence = result.get("pass_sequence", [])
+                similarity = result.get("similarity", 0.0)
+                retrieved_sequences.append({
+                    "pass_sequence": sequence,
+                    "similarity": similarity
+                })
+    except Exception as e:
+        print(f"Error executing RAG tool: {e}")
+        # Fallback: Use ground truth and generate some variations
+        retrieved_sequences = [{"pass_sequence": ground_truth_sequence, "similarity": 0.95}]
+        
+        # Generate some random variations for additional sequences
+        # Add up to top_k-1 more sequences
+        all_passes = [action.value for action in Actions_LLVM_10_0_0]
+        for i in range(top_k - 1):
+            # Create a random sequence with 1-5 passes
+            seq_length = random.randint(1, 5)
+            random_seq = [random.choice(all_passes) for _ in range(seq_length)]
+            retrieved_sequences.append({
+                "pass_sequence": random_seq,
+                "similarity": max(0.1, 0.95 - (i+1) * 0.2)  # Decreasing similarity
+            })
+    
+    # Ensure ground truth is included in the results
+    ground_truth_included = False
+    for seq in retrieved_sequences:
+        if seq["pass_sequence"] == ground_truth_sequence:
+            ground_truth_included = True
+            break
+            
+    # If ground truth not already included, replace the last sequence with it
+    if not ground_truth_included and retrieved_sequences:
+        retrieved_sequences[-1] = {
+            "pass_sequence": ground_truth_sequence,
+            "similarity": retrieved_sequences[0]["similarity"] - 0.05  # Slightly less similar than the top result
+        }
+    
+    # Limit to top_k
+    retrieved_sequences = retrieved_sequences[:top_k]
+    
+    # Create tool response
+    tool_response = {
+        "results": retrieved_sequences
+    }
+    
+    # User turn with tool response
+    user_turn = [
+        "<|im_start|>user",
+        f"<tool_response>\n{json.dumps(tool_response, indent=2)}\n</tool_response>",
+        "<|im_end|>"
+    ]
+    result_parts.append("\n".join(user_turn))
+    
+    # --- Assistant Turn 2: Analysis and final answer ---
+    final_thinking_lines = ["<think>"]
+    final_thinking_lines.append("[Analyzing RAG Results]")
+    final_thinking_lines.append(f"- Retrieved {len(retrieved_sequences)} optimization pass sequences from the RAG tool.")
+    
+    # Add analysis of each retrieved sequence
+    for i, seq in enumerate(retrieved_sequences):
+        sequence_str = ", ".join(seq["pass_sequence"])
+        final_thinking_lines.append(f"- Sequence {i+1} (similarity: {seq['similarity']:.4f}): [{sequence_str}]")
+        
+        # Add brief analysis based on the sequence content
+        if seq["pass_sequence"] == ground_truth_sequence:
+            seq_analysis = "This sequence appears most promising based on feature similarity."
+            # Add some reasoning about specific passes
+            if len(seq["pass_sequence"]) > 0:
+                for pass_name in seq["pass_sequence"][:2]:  # Just analyze first couple of passes
+                    pass_desc = PASS_DESCRIPTIONS.get(pass_name, DEFAULT_PASS_DESC)
+                    final_thinking_lines.append(f"  - {pass_name}: {pass_desc}")
+            final_thinking_lines.append(f"  - Analysis: {seq_analysis}")
+    
+    # Decision explanation (always choose ground truth for SFT data generation)
+    chosen_seq_idx = -1
+    for i, seq in enumerate(retrieved_sequences):
+        if seq["pass_sequence"] == ground_truth_sequence:
+            chosen_seq_idx = i
+            break
+    
+    if chosen_seq_idx >= 0:
+        final_thinking_lines.append(f"\n- Decision: Selecting sequence {chosen_seq_idx+1} because:")
+        final_thinking_lines.append("  1. It has good similarity to our input code's features")
+        final_thinking_lines.append("  2. The combination of passes addresses key optimization opportunities")
+        final_thinking_lines.append("  3. The passes complement each other well in addressing different aspects")
+    else:
+        # This shouldn't happen with our logic, but just in case
+        final_thinking_lines.append("\n- Decision: None of the retrieved sequences are optimal.")
+        final_thinking_lines.append("  Creating a custom sequence based on best practices.")
+    
+    final_thinking_lines.append("</think>")
+    
+    # Final assistant turn
+    final_assistant_turn = [
+        "<|im_start|>assistant",
+        "\n".join(final_thinking_lines),
+        f"<answer>\n{ground_truth_sequence}\n</answer>",
+        "<|im_end|>"
+    ]
+    result_parts.append("\n".join(final_assistant_turn))
+    
+    return "\n".join(result_parts)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -572,6 +737,12 @@ def main():
                         help='Maximum number of samples to process')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for data splitting')
+    parser.add_argument('--use_rag', action='store_true',
+                        help='Use RAG-based approach for generating SFT data')
+    parser.add_argument('--top_k', type=int, default=3,
+                        help='Number of sequences to retrieve in RAG approach')
+    parser.add_argument('--verbose', action='store_true',
+                        help='Enable verbose output')
 
     args = parser.parse_args()
 
@@ -608,9 +779,23 @@ def main():
     
     print(f"Loaded {len(df)} samples")
     
+    # 如果启用了RAG，预先初始化RAG工具以避免重复初始化
+    rag_tool = None
+    if args.use_rag:
+        print("Initializing RAG search tool...")
+        try:
+            from agent_r1.tool.tools.comiler_autotuning.rag_search_tool import RAGSearchTool
+            rag_tool = RAGSearchTool()
+            print("RAG search tool initialized successfully.")
+        except Exception as e:
+            print(f"Warning: Failed to initialize RAG search tool: {e}")
+            print("Will use fallback method for RAG-based SFT generation.")
+    
     # 处理数据帧
     data_records = []
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing data"):
+    print(f"Processing data with {'RAG-based' if args.use_rag else 'simple'} approach...")
+    
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing data"):
         # 提取文件名
         filename = row['Filename']
         
@@ -637,16 +822,42 @@ The LLVM IR code is represented by autophase features, the initial autophase fea
 Initial instruction count: {initial_inst_count}
 """
             
-            # 生成思考过程和工具调用
-            # full_process = generate_thinking_process(filename, autophase_embedding, pass_sequence)
-            full_process = [
-                "<|im_start|>assistant",
-                f"<answer>\n{pass_sequence}\n</answer>", # Use the determined sequence
-                "<|im_end|>"
-            ]
-            
-            full_process = "\n".join(full_process)
-
+            # 根据命令行参数选择SFT数据生成方法
+            if args.use_rag:
+                # 使用RAG搜索工具生成SFT数据
+                if args.verbose:
+                    print(f"\nProcessing {filename} with RAG-based approach...")
+                
+                try:
+                    full_process = generate_rag_based_sft(
+                        autophase_embedding=autophase_embedding,
+                        ground_truth_sequence=pass_sequence,
+                        top_k=args.top_k,
+                        rag_tool=rag_tool
+                    )
+                    if args.verbose:
+                        print(f"Successfully generated RAG-based SFT data for {filename}")
+                except Exception as e:
+                    print(f"\nError generating RAG-based SFT data for {filename}: {e}")
+                    print("Falling back to simple approach...")
+                    full_process = [
+                        "<|im_start|>assistant",
+                        f"<answer>\n{pass_sequence}\n</answer>", # Use the determined sequence
+                        "<|im_end|>"
+                    ]
+                    full_process = "\n".join(full_process)
+            else:
+                # 使用简单方法生成SFT数据
+                if args.verbose:
+                    print(f"\nProcessing {filename} with simple approach...")
+                
+                full_process = [
+                    "<|im_start|>assistant",
+                    f"<answer>\n{pass_sequence}\n</answer>", # Use the determined sequence
+                    "<|im_end|>"
+                ]
+                full_process = "\n".join(full_process)
+            print(full_process)
             # 创建记录
             record = {
                 'question': question,
@@ -656,12 +867,13 @@ Initial instruction count: {initial_inst_count}
                 'pass_sequence': pass_sequence,
                 'over_oz': over_oz
             }
-
             
             data_records.append(record)
         except Exception as e:
-            print(f"Error processing row for {filename}: {e}")
+            print(f"\nError processing row for {filename}: {e}")
             continue
+    
+    print(f"Successfully processed {len(data_records)} records out of {len(df)} samples")
     
     # 创建数据集
     dataset = datasets.Dataset.from_pandas(pd.DataFrame(data_records))
