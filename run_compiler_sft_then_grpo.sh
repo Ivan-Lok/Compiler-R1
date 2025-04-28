@@ -73,11 +73,10 @@ if [ -f "$HOME/data/compiler_autotuning_sft/train.parquet" ] && \
         mkdir -p $HOME/data/compiler_autotuning_sft
         export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
         python3 -m examples.data_preprocess.compiler_autotuning_sft \
-          --use_rag \
-          --data_file=examples/data_preprocess/compiler_autotuning_data.csv \
+          --data_file=examples/data_preprocess/train_random200max_LLM_new.csv \
           --local_dir=$HOME/data/compiler_autotuning_sft \
           --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
-          --max_samples=3000
+          --max_samples=800
     else
         echo "使用现有的SFT数据集继续..."
     fi
@@ -90,9 +89,9 @@ else
     python3 -m examples.data_preprocess.compiler_autotuning_sft \
       --use_rag \
       --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
-      --data_file=examples/data_preprocess/compiler_autotuning_data.csv \
+      --data_file=examples/data_preprocess/train_random200max_LLM_new.csv \
       --local_dir=$HOME/data/compiler_autotuning_sft \
-      --max_samples=3000
+      --max_samples=800
 fi
 
 # 检查SFT检查点是否存在
@@ -117,7 +116,7 @@ if [ ! -z "$latest_checkpoint" ]; then
           data.micro_batch_size_per_gpu=4 \
           data.prompt_key=extra_info \
           data.response_key=extra_info \
-          optim.lr=1e-5 \
+          optim.lr=1e-6 \
           +data.prompt_dict_keys=['question'] \
           +data.response_dict_keys=['answer'] \
           data.micro_batch_size=4 \
@@ -157,7 +156,7 @@ else
       data.micro_batch_size_per_gpu=4 \
       data.prompt_key=extra_info \
       data.response_key=extra_info \
-      optim.lr=1e-5 \
+      optim.lr=1e-6 \
       +data.prompt_dict_keys=['question'] \
       +data.response_dict_keys=['answer'] \
       data.micro_batch_size=4 \
@@ -201,7 +200,7 @@ if [ -f "$HOME/data/compiler_autotuning_grpo/train.parquet" ] && \
         echo "准备增强版GRPO数据..."
         export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
         python3 -m examples.data_preprocess.compiler_autotuning \
-          --data_file=examples/data_preprocess/train_random200max_LLM_new_filter.csv \
+          --data_file=examples/data_preprocess/train_random200max_LLM_new.csv \
           --local_dir=$HOME/data/compiler_autotuning_grpo \
           --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
           --val_files examples/data_preprocess/val-cbench.csv \
@@ -218,7 +217,7 @@ else
     echo "准备增强版GRPO数据..."
     export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
     python3 -m examples.data_preprocess.compiler_autotuning \
-          --data_file=examples/data_preprocess/train_random200max_LLM_new_filter.csv \
+          --data_file=examples/data_preprocess/train_random200max_LLM_new.csv \
           --local_dir=$HOME/data/compiler_autotuning_grpo \
           --llvm_ir_dir=examples/data_preprocess/llvmir_datasets/ \
           --val_files examples/data_preprocess/val-cbench.csv \
@@ -232,13 +231,13 @@ fi
 
 # GRPO阶段使用4个GPU (0,1,2,3)
 export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/verl/
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0,1
 # 运行GRPO训练，使用SFT训练好的模型
 python3 -m agent_r1.src.main_agent \
   algorithm.adv_estimator=grpo \
   data.train_files=$HOME/data/compiler_autotuning_grpo/train.parquet \
   "data.val_files=[$HOME/data/compiler_autotuning_grpo/validation_val-cbench.parquet,$HOME/data/compiler_autotuning_grpo/validation_val-blas.parquet,$HOME/data/compiler_autotuning_grpo/validation_val-chstone.parquet,$HOME/data/compiler_autotuning_grpo/validation_val-mibench.parquet,$HOME/data/compiler_autotuning_grpo/validation_val-npb.parquet,$HOME/data/compiler_autotuning_grpo/validation_val-opencv.parquet,$HOME/data/compiler_autotuning_grpo/validation_val-tensorflow.parquet]" \
-  data.train_batch_size=128 \
+  data.train_batch_size=64 \
   data.max_prompt_length=4096 \
   data.max_response_length=4096 \
   data.max_start_length=4096 \
@@ -251,8 +250,8 @@ python3 -m agent_r1.src.main_agent \
   actor_rollout_ref.model.enable_gradient_checkpointing=True \
   \
   actor_rollout_ref.actor.optim.lr=1e-6 \
-  actor_rollout_ref.actor.ppo_mini_batch_size=16 \
-  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
+  actor_rollout_ref.actor.ppo_mini_batch_size=4 \
+  actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=2 \
   actor_rollout_ref.actor.use_kl_loss=True \
   actor_rollout_ref.actor.kl_loss_coef=0.001 \
   actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -261,13 +260,13 @@ python3 -m agent_r1.src.main_agent \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
   \
   actor_rollout_ref.rollout.name=vllm \
-  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
-  actor_rollout_ref.rollout.tensor_model_parallel_size=4 \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
+  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
+  actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
+  actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
   actor_rollout_ref.rollout.n_repeat=5 \
   actor_rollout_ref.rollout.dtype=bfloat16 \
   \
-  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
+  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=2 \
   actor_rollout_ref.ref.fsdp_config.param_offload=False \
   \
   algorithm.kl_ctrl.kl_coef=0.001 \
@@ -276,7 +275,7 @@ python3 -m agent_r1.src.main_agent \
   "trainer.logger=[console,wandb]" \
   trainer.project_name=$project_name \
   trainer.experiment_name=$grpo_experiment_name \
-  trainer.n_gpus_per_node=4 \
+  trainer.n_gpus_per_node=2 \
   trainer.nnodes=1 \
   trainer.save_freq=5 \
   trainer.test_freq=1 \

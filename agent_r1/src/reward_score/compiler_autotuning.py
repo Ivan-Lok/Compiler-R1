@@ -180,24 +180,24 @@ def parse_optimization_sequence(sequence_str: str) -> List[str]:
     if not sequence_str:
         return []
         
-    try:
-        # Try to parse as JSON directly
-        return json.loads(sequence_str)
-    except json.JSONDecodeError:
-        # If direct parsing fails, try to extract JSON array pattern
-        json_array_pattern = r'\[(.*?)\]'
-        match = re.search(json_array_pattern, sequence_str, re.DOTALL)
-        if match:
-            try:
-                # Try to parse the extracted content
-                return json.loads(f"[{match.group(1)}]")
-            except json.JSONDecodeError:
-                pass
+    # try:
+    #     # Try to parse as JSON directly
+    #     return json.loads(sequence_str)
+    # except json.JSONDecodeError:
+    #     # If direct parsing fails, try to extract JSON array pattern
+    #     json_array_pattern = r'\[(.*?)\]'
+    #     match = re.search(json_array_pattern, sequence_str, re.DOTALL)
+    #     if match:
+    #         try:
+    #             # Try to parse the extracted content
+    #             return json.loads(f"[{match.group(1)}]")
+    #         except json.JSONDecodeError:
+    #             pass
                 
-        # If JSON parsing fails, try to extract individual optimization passes
-        passes = re.findall(r'--?[a-zA-Z0-9-]+', sequence_str)
-        if passes:
-            return passes
+    # If JSON parsing fails, try to extract individual optimization passes
+    passes = re.findall(r'--?[a-zA-Z0-9-]+', sequence_str)
+    if passes:
+        return passes
             
     return []
 
@@ -239,177 +239,495 @@ def _save_debug_log(log_lines: List[str], solution: str, func_name: str):
         print(f"Error saving debug log: {e}")
 
 
-def compute_score_format(text):
+# --- Assume helper functions exist (_extract_json, _extract_answer_list, _extract_think_content) ---
+# --- Use the same robust helper implementations from the previous response ---
+def _extract_json(tag: str, text: str) -> Optional[Dict[str, Any]]:
+    match = re.search(rf"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
+    if not match: return None
+    content = match.group(1).strip()
+    try:
+        if content.startswith("```json"): content = content[len("```json"):].strip()
+        if content.endswith("```"): content = content[:-len("```")].strip()
+        parsed = json.loads(content)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError: return None
+
+def _extract_answer_list(text: str) -> Optional[List[str]]:
+    match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
+    if not match: return None
+    content = match.group(1).strip()
+    try:
+        if content.startswith("```"):
+             lines = content.splitlines()
+             if len(lines) > 1: content = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:]).strip()
+             else: content = content[3:-3].strip()
+        parsed = ast.literal_eval(content)
+        if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+             return parsed if parsed == ['-Oz'] or (parsed and parsed != ['-Oz']) else None
+        return None
+    except (ValueError, SyntaxError, TypeError): return None
+
+def _extract_think_content(text: str) -> Optional[str]:
+    match = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
+    return match.group(1).strip() if match else None
+
+
+# --- Scoring Function (Additive Core + Perfection Flag - FIXED) ---
+def compute_score_format(text: str) -> float:
     """
-    检查输入文本是否满足以下格式要求:
-    1. 必须包含 <|im_start|>assistant ... <|im_end|> 格式
-    2. 必须包含 <answer> ... </answer> 标签或正确的工具调用<tool_call>...</tool_call>
-    3. <answer> 标签内必须包含有效的优化选项序列(列表或单个选项)
-    4. 如果包含工具调用，必须使用正确的工具且参数格式正确
-    
-    支持以下<answer>格式:
-    - 列表格式: ["--option1", "--option2", ...]
-    - Python列表: [--option1, --option2, ...]
-    - 单行格式: "--option1 --option2 ..."
-    - 多行格式: 每行一个选项
-    
-    支持的工具调用:
-    - rag_search: 用于检索相似的优化序列
-    - gen_autophase: 用于生成自动相位特征
-    - optimize_llcode: 用于优化LLVM IR代码
-    - count_instructions: 用于计算优化前后的指令数
-    
+    Computes a format score. Assigns 1.0 ONLY if the sample perfectly follows
+    either Path A or Path B logic and format. Otherwise, returns < 1.0.
+
     Args:
-        text: 需要检查格式的输入字符串。
+        text: The SFT sample string to evaluate.
 
     Returns:
-        格式评分: 10分(完全符合格式要求), 5分(基本符合但有小问题), 0分(部分符合), -10分(不符合)
+        1.0 for a perfect path, otherwise a float score < 1.0.
     """
-    debug_logs = []
-    debug_logs.append("开始检查格式...")
-    
-    # 检查是否包含助手回复块
-    assistant_pattern = r'<\|im_start\|>assistant\s*(.*?)<\|im_end\|>'
-    assistant_match = re.search(assistant_pattern, text, re.DOTALL)
-    if not assistant_match:
-        debug_logs.append("格式错误: 不包含助手回复块")
-        # _save_debug_log(debug_logs, text, "compute_score_format")
-        return -10  # 不包含助手回复块
-    
-    assistant_content = assistant_match.group(1)
-    
-    # 检查是否包含tool_call标签
-    tool_call_pattern = r'<tool_call>\s*(.*?)\s*</tool_call>'
-    tool_call_match = re.search(tool_call_pattern, assistant_content, re.DOTALL)
-    
-    # 检查是否包含answer标签
-    answer_pattern = r'<answer>\s*(.*?)\s*</answer>'
-    answer_match = re.search(answer_pattern, assistant_content, re.DOTALL)
-    
-    # 如果两者都不存在，则格式不正确
-    if not tool_call_match and not answer_match:
-        debug_logs.append("格式错误: 既没有<tool_call>也没有<answer>标签")
-        # _save_debug_log(debug_logs, text, "compute_score_format")
-        return -5  # 不包含任何有效标签
-    
-    # 评分初始值
-    format_score = 0
-    
-    # 检查工具调用格式（如果存在）
-    if tool_call_match:
-        debug_logs.append("检测到<tool_call>标签")
-        tool_call_content = tool_call_match.group(1).strip()
-        
-        # 检查工具调用JSON格式
-        try:
-            tool_data = json.loads(tool_call_content)
-            tool_name = tool_data.get("name", "")
-            debug_logs.append(f"工具名称: {tool_name}")
-            
-            # 检查是否使用了支持的工具
-            supported_tools = ["rag_search", "gen_autophase", "optimize_llcode", "count_instructions"]
-            if tool_name in supported_tools:
-                format_score += 5
-                debug_logs.append(f"使用了支持的工具: {tool_name}")
-                
-                # 检查参数格式
-                arguments = tool_data.get("arguments", {})
-                if isinstance(arguments, dict):
-                    # 根据不同工具检查参数
-                    if tool_name == "rag_search":
-                        if "autophase_embedding" in arguments:
-                            format_score += 5
-                            debug_logs.append("rag_search工具参数格式正确")
-                        else:
-                            debug_logs.append("rag_search工具缺少必要参数: autophase_embedding")
-                    
-                    elif tool_name == "gen_autophase":
-                        if "optimization_passes" in arguments:
-                            format_score += 5
-                            debug_logs.append("gen_autophase工具参数格式正确")
-                        else:
-                            debug_logs.append("gen_autophase工具缺少必要参数: optimization_passes")
-                    
-                    elif tool_name == "optimize_llcode":
-                        if "ll_code" in arguments and "passes" in arguments:
-                            format_score += 5
-                            debug_logs.append("optimize_llcode工具参数格式正确")
-                        else:
-                            debug_logs.append("optimize_llcode工具缺少必要参数: ll_code或passes")
-                            
-                    elif tool_name == "count_instructions":
-                        if "filename" in arguments and "optimization_passes" in arguments:
-                            format_score += 5
-                            debug_logs.append("count_instructions工具参数格式正确")
-                        else:
-                            debug_logs.append("count_instructions工具缺少必要参数: filename或optimization_passes")
-                else:
-                    debug_logs.append("工具参数格式错误: 不是字典类型")
-            else:
-                debug_logs.append(f"使用了不支持的工具: {tool_name}")
-        except json.JSONDecodeError:
-            debug_logs.append("工具调用JSON格式解析失败")
-    
-    # 检查答案格式（如果存在）
-    if answer_match:
-        debug_logs.append("检测到<answer>标签")
-        answer_content = answer_match.group(1).strip()
-        
-        if not answer_content:
-            debug_logs.append("answer标签内容为空")
-            # _save_debug_log(debug_logs, text, "compute_score_format")
-            return -5  # answer标签内容为空
-        
-        # 检查优化选项格式
-        # 1. 检查JSON列表格式 ["--option1", "--option2", ...]
-        json_list_pattern = r'\[\s*(?:"[^"]*"|\'[^\']*\')(?:\s*,\s*(?:"[^"]*"|\'[^\']*\'))?\s*\]'
-        # 2. 检查Python列表表示 [--option1, --option2, ...]
-        python_list_pattern = r'\[\s*(?:--[a-zA-Z0-9-]+)(?:\s*,\s*(?:--[a-zA-Z0-9-]+))?\s*\]'
-        # 3. 检查单行格式 --option1 --option2 ...
-        single_line_pattern = r'(?:--[a-zA-Z0-9-]+)(?:\s+--[a-zA-Z0-9-]+)*'
-        # 4. 检查多行格式 (每行一个选项)
-        multi_line_pattern = r'(?:--[a-zA-Z0-9-]+\s*)+' 
-        
-        # 检查优化选项
-        has_valid_format = (
-            re.fullmatch(json_list_pattern, answer_content) is not None or
-            re.fullmatch(python_list_pattern, answer_content) is not None or
-            re.fullmatch(single_line_pattern, answer_content) is not None or
-            re.fullmatch(multi_line_pattern, answer_content) is not None or
-            "--" in answer_content.lower()  # 宽松检查，至少包含一个优化选项标识
-        )
-        
-        if has_valid_format:
-            # 检查是否至少包含一个以--开头的选项
-            if re.search(r'--[a-zA-Z0-9-]+', answer_content):
-                format_score = 10  # 完全符合answer格式要求
-                debug_logs.append("answer标签格式正确，包含有效的优化选项")
-            else:
-                format_score = 5  # 基本格式正确但没有明确的优化选项
-                debug_logs.append("answer标签格式基本正确，但没有明确的优化选项")
-        
-        # 格式不符合要求但可能是 -Oz 选项
-        elif "-Oz" in answer_content:
-            format_score = 10  # 特殊情况: -Oz 选项
-            debug_logs.append("answer标签包含特殊选项: -Oz")
-        else:
-            debug_logs.append("answer标签格式不符合要求")
-    
-    # 根据评分结果返回最终格式评分
-    if format_score >= 10:
-        final_score = 10
-    elif format_score >= 5:
-        final_score = 5
-    elif format_score > 0:
-        final_score = 0
+    if not text or not isinstance(text, str):
+       # print("Format Check Failed: Input is null or not a string.")
+        return 0.0
+
+    score = 0.0
+    is_perfect_so_far = True # Assume perfection until proven otherwise
+
+    # --- Initial Checks ---
+    if text.strip().startswith("<error>"):
+        # print("Format Check Failed: Text starts with <error> tag.")
+        is_perfect_so_far = False
+        return 0.0 # Cannot be perfect, score 0
+    if "<error>" in text:
+         # print("Format Check Warning: Text contains an <error> tag mid-stream.")
+         is_perfect_so_far = False
+         # Additive score might increase, but perfection is lost
     else:
-        final_score = -10
-    
-    debug_logs.append(f"最终格式评分: {final_score}")
-    # if final_score < 5:
-    #     # _save_debug_log(debug_logs, text, "compute_score_format")
-    
-    return final_score
+        score += 0.10 # Base points for no error tags
+
+    has_correct_start = text.startswith("<|im_start|>assistant")
+    has_correct_end = text.strip().endswith("<|im_end|>")
+
+    if has_correct_start: score += 0.08
+    else:
+        # print("Format Check Failed: Text does not start with '<|im_start|>assistant'.")
+        is_perfect_so_far = False
+    if has_correct_end: score += 0.08
+    else:
+        # print("Format Check Failed: Text does not end with '<|im_end|>'.")
+        is_perfect_so_far = False
+
+    # --- Split into Turns ---
+    turns_raw = re.split(r'(<\|im_start\|>)', text)
+    turns = []
+    if len(turns_raw) > 1:
+        for i in range(1, len(turns_raw), 2):
+            if i + 1 < len(turns_raw):
+                turns.append(turns_raw[i] + turns_raw[i + 1])
+
+    if not turns:
+        # print("Format Check Failed: Could not split text into turns.")
+        is_perfect_so_far = False
+        return min(score, 0.99) if score > 0 else 0.0 # Return whatever score accumulated < 1.0
+
+    score += 0.04 # Points for being able to split
+
+    start_count = len(turns)
+    end_count = text.count("<|im_end|>")
+    if start_count == end_count:
+        score += 0.10
+    else:
+         # print(f"Format Check Failed: Mismatched start/end markers ({start_count} starts, {end_count} ends).")
+         is_perfect_so_far = False
+
+    # --- State Variables ---
+    initial_optimization_flags: Optional[List[str]] = None
+    instrcount_improvement: Optional[float] = None
+    find_best_improvement: Optional[float] = None
+    find_best_sequence: Optional[List[str]] = None
+    expected_path: Optional[str] = None
+    last_tool_called: Optional[str] = None
+    found_answer_tag_in_final_assistant_turn = False # Specifically tracks if <answer> was parsed in the *correct* final turn
+    final_answer_content_validated = False # Specifically tracks if the *value* in <answer> was correct for the path
+
+    # --- Turn-by-Turn Validation ---
+    expected_turn_type = 'assistant'
+    num_turns = len(turns)
+    points_per_think_phrase = 0.02
+
+    for i, turn_text in enumerate(turns):
+        # If perfection is already lost, we still parse to calculate additive score,
+        # but we don't need to perform the detailed *perfection* checks anymore.
+        # However, setting the flag multiple times is harmless.
+
+        is_last_turn = (i == num_turns - 1)
+        turn_text_stripped = turn_text.strip()
+        current_turn_score = 0.0 # Additive points for this turn
+
+        # Basic turn structure
+        has_turn_end_tag = turn_text_stripped.endswith("<|im_end|>")
+        if has_turn_end_tag: current_turn_score += 0.01
+        else:
+             # print(f"Format Check Failed: Turn {i+1} missing '<|im_end|>'.")
+             is_perfect_so_far = False # IMPERFECTION
+
+        content_match = re.match(r"<\|im_start\|>(.*?)<\|im_end\|>?$", turn_text_stripped, re.DOTALL)
+        if not content_match:
+             # print(f"Format Check Failed: Could not extract content for Turn {i+1}.")
+             is_perfect_so_far = False # IMPERFECTION
+             score += current_turn_score # Add any points earned so far for this broken turn
+             continue # Cannot process content
+        turn_content = content_match.group(1).strip()
+
+        # Turn Role and Payload
+        actual_turn_type = None
+        turn_payload = ""
+        if turn_content.startswith("assistant"): actual_turn_type = 'assistant'
+        elif turn_content.startswith("user"): actual_turn_type = 'user'
+
+        if actual_turn_type:
+            turn_payload = turn_content[len(actual_turn_type):].strip()
+            current_turn_score += 0.01 # Points for valid role
+            if actual_turn_type != expected_turn_type:
+                 # print(f"Format Check Failed: Turn {i+1} expected '{expected_turn_type}' but got '{actual_turn_type}'.")
+                 is_perfect_so_far = False # IMPERFECTION
+                 expected_turn_type = actual_turn_type # Adjust to try parsing next turn
+            else:
+                 current_turn_score += 0.01 # Points for correct role sequence
+        else:
+            # print(f"Format Check Failed: Turn {i+1} content missing role 'assistant' or 'user'.")
+            is_perfect_so_far = False # IMPERFECTION
+            expected_turn_type = 'user' if expected_turn_type == 'assistant' else 'assistant' # Guess next
+            score += current_turn_score
+            continue # Cannot process payload
+
+        # --- Content Validation ---
+        think_content = _extract_think_content(turn_payload)
+        tool_call_json = _extract_json("tool_call", turn_payload)
+        tool_response_json = _extract_json("tool_response", turn_payload)
+        answer_list = None # Parse later only if appropriate
+
+        # Check for <think> tag in assistant turns (REQUIRED for perfection)
+        has_think_tag = think_content is not None
+        if actual_turn_type == 'assistant':
+             if has_think_tag: current_turn_score += 0.01
+             else:
+                 # print(f"Format Check Failed: Turn {i+1} (Assistant) missing <think> tag.")
+                 is_perfect_so_far = False # IMPERFECTION
+
+        # Check for required phrases (REQUIRED for perfection)
+        phrase_found = False
+        required_phrase = None
+
+        # == Turn 1: Assistant ==
+        if i == 0 and actual_turn_type == 'assistant':
+            required_phrase = "[Initial Pass Sequence Analysis]"
+            if has_think_tag and required_phrase in think_content:
+                 phrase_found = True
+                 current_turn_score += points_per_think_phrase
+            elif has_think_tag: 
+                pass
+                # print(f"Format Check Info: Turn 1 <think> missing required phrase '{required_phrase}'.")
+            if not phrase_found and has_think_tag : # Only mark imperfect if think tag exists but phrase missing
+                 is_perfect_so_far = False # IMPERFECTION
+
+            tool_call_ok = False
+            if tool_call_json:
+                current_turn_score += 0.03
+                last_tool_called = tool_call_json.get("name")
+                if last_tool_called == "instrcount":
+                    current_turn_score += 0.04
+                    args = tool_call_json.get("arguments", {})
+                    if isinstance(args, dict):
+                         current_turn_score += 0.01
+                         initial_optimization_flags = args.get("optimization_flags")
+                         filename_ok = isinstance(args.get("filename"), str) and args["filename"]
+                         flags_ok = isinstance(initial_optimization_flags, list) # Content validation later
+                         if filename_ok: current_turn_score += 0.02
+                         else:
+                            # print(f"Format Check Failed: Turn 1 'filename' missing/invalid."); 
+                            is_perfect_so_far = False # IMPERFECTION
+                         if flags_ok: current_turn_score += 0.02
+                         else: 
+                            # print(f"Format Check Failed: Turn 1 'optimization_flags' missing/invalid."); 
+                            is_perfect_so_far = False # IMPERFECTION
+                         tool_call_ok = filename_ok and flags_ok
+                    else: 
+                        # print(f"Format Check Failed: Turn 1 <tool_call> 'arguments' not dictionary."); 
+                        is_perfect_so_far = False # IMPERFECTION
+                else: 
+                    # print(f"Format Check Failed: Turn 1 <tool_call> name incorrect."); 
+                    is_perfect_so_far = False # IMPERFECTION
+            else: 
+                # print(f"Format Check Failed: Turn 1 missing <tool_call>."); 
+                is_perfect_so_far = False # IMPERFECTION
+            expected_turn_type = 'user'
+
+        # == Turn 2: User ==
+        elif i == 1 and actual_turn_type == 'user':
+            response_ok = False
+            if tool_response_json:
+                current_turn_score += 0.04
+                status = tool_response_json.get("status")
+                if status == "success":
+                    current_turn_score += 0.02
+                    imp = tool_response_json.get("improvement_over_oz")
+                    if isinstance(imp, (int, float)):
+                        current_turn_score += 0.04
+                        instrcount_improvement = float(imp)
+                        expected_path = 'A' if instrcount_improvement > 0 else 'B'
+                        response_ok = True
+                    else: 
+                        # print(f"Format Check Failed: Turn 2 'improvement_over_oz' missing/invalid."); 
+                        is_perfect_so_far = False # IMPERFECTION
+                elif status == "error":
+                    current_turn_score += 0.02
+                    instrcount_improvement = -1.0
+                    expected_path = 'B'
+                    response_ok = True # Error is valid status, forces Path B
+                    # print(f"Format Check Info: Turn 2 reported error, proceeding with Path B.")
+                else: 
+                    # print(f"Format Check Failed: Turn 2 invalid 'status'."); 
+                    is_perfect_so_far = False # IMPERFECTION
+            else: 
+                # print(f"Format Check Failed: Turn 2 missing <tool_response>."); 
+                is_perfect_so_far = False # IMPERFECTION
+            expected_turn_type = 'assistant'
+
+        # == Turn 3: Assistant ==
+        elif i == 2 and actual_turn_type == 'assistant':
+            if expected_path is None: # Error occurred in Turn 2
+                 # print(f"Format Check Failed: Cannot process Turn 3 - path undetermined due to Turn 2 error.")
+                 is_perfect_so_far = False # IMPERFECTION
+            elif expected_path == 'A':
+                required_phrase = "[Result Analysis]"
+                if has_think_tag and required_phrase in think_content:
+                     phrase_found = True
+                     current_turn_score += points_per_think_phrase
+                elif has_think_tag: 
+                    pass
+                    # print(f"Format Check Info: Turn 3 (Path A) <think> missing required phrase '{required_phrase}'.")
+                if not phrase_found and has_think_tag: is_perfect_so_far = False # IMPERFECTION
+
+                if tool_call_json:
+                    # print(f"Format Check Failed: Turn 3 (Path A) has unexpected <tool_call>.")
+                    is_perfect_so_far = False # IMPERFECTION
+                else: current_turn_score += 0.02 # Correctly no tool call
+
+                if not is_last_turn:
+                     # print(f"Format Check Failed: Turn 3 (Path A) should be the last turn.")
+                     is_perfect_so_far = False # IMPERFECTION
+                else:
+                     current_turn_score += 0.03 # Correctly the last turn
+                     answer_list = _extract_answer_list(turn_payload) # Parse answer here
+                     if answer_list is not None:
+                         current_turn_score += 0.05 # Valid format
+                         found_answer_tag_in_final_assistant_turn = True
+                         if initial_optimization_flags is not None and answer_list == initial_optimization_flags:
+                             current_turn_score += 0.08 # Correct value
+                             final_answer_content_validated = True
+                         else:
+                             # print(f"Format Check Failed: Turn 3 (Path A) <answer> content mismatch (Got: {answer_list}, Expected: {initial_optimization_flags}).")
+                             is_perfect_so_far = False # IMPERFECTION
+                     else:
+                         # print(f"Format Check Failed: Turn 3 (Path A) missing correctly formatted <answer>.")
+                         is_perfect_so_far = False # IMPERFECTION
+
+            elif expected_path == 'B':
+                required_phrase = "[Finding Better Pass Sequence]"
+                if has_think_tag and required_phrase in think_content:
+                     phrase_found = True
+                     current_turn_score += points_per_think_phrase
+                elif has_think_tag: 
+                    pass
+                    # print(f"Format Check Info: Turn 3 (Path B) <think> missing required phrase '{required_phrase}'.")
+                if not phrase_found and has_think_tag: is_perfect_so_far = False # IMPERFECTION
+
+                # Check specifically if <answer> tag exists, should not be here
+                if _extract_answer_list(turn_payload) is not None:
+                    # print(f"Format Check Failed: Turn 3 (Path B) has unexpected <answer>.")
+                    is_perfect_so_far = False # IMPERFECTION
+                else: current_turn_score += 0.02 # Correctly no answer
+
+                tool_call_ok = False
+                if tool_call_json:
+                    current_turn_score += 0.03
+                    last_tool_called = tool_call_json.get("name")
+                    if last_tool_called == "find_best_pass_sequence":
+                        current_turn_score += 0.04
+                        args = tool_call_json.get("arguments", {})
+                        if isinstance(args, dict):
+                            current_turn_score += 0.01
+                            if isinstance(args.get("filename"), str) and args["filename"]:
+                                current_turn_score += 0.02
+                                tool_call_ok = True
+                            else: 
+                                # print(f"Format Check Failed: Turn 3 (Path B) 'filename' missing/invalid."); 
+                                is_perfect_so_far = False # IMPERFECTION
+                        else: 
+                            # print(f"Format Check Failed: Turn 3 (Path B) 'arguments' not dictionary."); 
+                            is_perfect_so_far = False # IMPERFECTION
+                    else: 
+                        # print(f"Format Check Failed: Turn 3 (Path B) <tool_call> name incorrect."); 
+                        is_perfect_so_far = False # IMPERFECTION
+                else: 
+                    # print(f"Format Check Failed: Turn 3 (Path B) missing <tool_call>."); 
+                    is_perfect_so_far = False # IMPERFECTION
+                expected_turn_type = 'user'
+
+        # == Turn 4: User ==
+        elif i == 3 and actual_turn_type == 'user':
+             if expected_path == 'B':
+                 response_ok = False
+                 if tool_response_json:
+                     current_turn_score += 0.04
+                     status = tool_response_json.get("status")
+                     if status == "success":
+                         current_turn_score += 0.02
+                         imp = tool_response_json.get("improvement_percentage")
+                         seq = tool_response_json.get("best_pass_sequence")
+                         imp_ok = isinstance(imp, (int, float))
+                         seq_ok = isinstance(seq, list) and all(isinstance(p, str) for p in seq)
+                         if imp_ok: current_turn_score += 0.03
+                         else: 
+                            # print(f"Format Check Failed: Turn 4 'improvement_percentage' missing/invalid."); 
+                            is_perfect_so_far = False # IMPERFECTION
+                         if seq_ok: current_turn_score += 0.03
+                         else: 
+                            # print(f"Format Check Failed: Turn 4 'best_pass_sequence' missing/invalid format."); 
+                            is_perfect_so_far = False # IMPERFECTION
+
+                         if imp_ok and seq_ok:
+                             find_best_improvement = float(imp)
+                             find_best_sequence = seq
+                             response_ok = True
+                     elif status == "error":
+                        current_turn_score += 0.02
+                        find_best_improvement = -1.0 # Error implies fallback needed
+                        find_best_sequence = None
+                        response_ok = True
+                        # print(f"Format Check Info: Turn 4 reported error, assuming Oz fallback.")
+                     else: 
+                        # print(f"Format Check Failed: Turn 4 invalid 'status'."); 
+                        is_perfect_so_far = False # IMPERFECTION
+                 else: 
+                    # print(f"Format Check Failed: Turn 4 (Path B) missing <tool_response>."); 
+                    is_perfect_so_far = False # IMPERFECTION
+                 expected_turn_type = 'assistant'
+             else: # Should not be in Turn 4 if Path A or error
+                  # print(f"Format Check Failed: Unexpected Turn 4 (User) - path was '{expected_path}'.")
+                  is_perfect_so_far = False # IMPERFECTION
+
+        # == Turn 5: Assistant ==
+        elif i == 4 and actual_turn_type == 'assistant':
+             if expected_path == 'B':
+                 # Phrase check depends on Turn 4 result state
+                 required_phrase = None
+                 if find_best_improvement is not None: # Only check if Turn 4 was processed ok
+                     required_phrase = "[Final Decision - Found Improved Sequence]" if find_best_improvement > 0 else "[Final Decision - Fallback to -Oz]"
+                     if has_think_tag and required_phrase in think_content:
+                          phrase_found = True
+                          current_turn_score += points_per_think_phrase
+                     elif has_think_tag: 
+                         pass
+                        # print(f"Format Check Info: Turn 5 (Path B) <think> missing required phrase '{required_phrase}'.")
+                     if not phrase_found and has_think_tag: is_perfect_so_far = False # IMPERFECTION
+                 elif has_think_tag: # Turn 4 failed, cannot determine required phrase
+                     # print(f"Format Check Info: Cannot check Turn 5 phrase due to Turn 4 error.")
+                     is_perfect_so_far = False # Cannot be perfect if T4 failed but T5 exists
+
+                 if tool_call_json:
+                    # print(f"Format Check Failed: Turn 5 (Path B) has unexpected <tool_call>.")
+                    is_perfect_so_far = False # IMPERFECTION
+                 else: current_turn_score += 0.02 # Correctly no tool call
+
+                 if not is_last_turn:
+                     # print(f"Format Check Failed: Turn 5 (Path B) should be the last turn.")
+                     is_perfect_so_far = False # IMPERFECTION
+                 else:
+                     current_turn_score += 0.03 # Correctly the last turn
+                     answer_list = _extract_answer_list(turn_payload) # Parse answer here
+                     if answer_list is not None:
+                         current_turn_score += 0.05 # Valid format
+                         found_answer_tag_in_final_assistant_turn = True
+                         # Value validation depends on Turn 4 result state
+                         answer_value_ok = False
+                         if find_best_improvement is not None and find_best_sequence is not None and find_best_improvement > 0 :
+                             if answer_list == find_best_sequence: answer_value_ok = True
+                             else: 
+                                 pass
+                                 # print(f"Format Check Failed: Turn 5 (Path B) <answer> content mismatch (expected found sequence). Got {answer_list}, expected {find_best_sequence}")
+                         elif find_best_improvement is not None: # <= 0 or error in T4
+                             if answer_list == ['-Oz']: answer_value_ok = True
+                             else: 
+                                pass
+                                 # print(f"Format Check Failed: Turn 5 (Path B) <answer> content mismatch (expected ['-Oz']). Got {answer_list}")
+                         else: 
+                             pass
+                             # print(f"Format Check Failed: Cannot validate Turn 5 <answer> value due to Turn 4 error.") # T4 must have failed
+
+                         if answer_value_ok:
+                             current_turn_score += 0.08 # Correct value points
+                             final_answer_content_validated = True
+                         else:
+                             is_perfect_so_far = False # IMPERFECTION (Value incorrect)
+
+                     else: # Missing/invalid answer tag/format
+                         # print(f"Format Check Failed: Turn 5 (Path B) missing correctly formatted <answer>.")
+                         is_perfect_so_far = False # IMPERFECTION
+
+             else: # Should not be in Turn 5 if Path A or error
+                  # print(f"Format Check Failed: Unexpected Turn 5 (Assistant) - path was '{expected_path}'.")
+                  is_perfect_so_far = False # IMPERFECTION
+
+        # == Unexpected Turns ==
+        elif i > 4 : # Any turn beyond 5 is unexpected
+             # print(f"Format Check Failed: Unexpected Turn {i+1} ({actual_turn_type}). Too many turns.")
+             is_perfect_so_far = False # IMPERFECTION
+
+        score += current_turn_score # Add additive points for this turn
+        # Update expectation for next turn (only relevant if loop continues)
+        expected_turn_type = 'user' if actual_turn_type == 'assistant' else 'assistant'
+
+
+    # --- Final Global Checks for Perfection ---
+    # These act as final confirmation that the overall structure matches the path taken.
+    if expected_path == 'A':
+        if num_turns != 3:
+            # print(f"Format Check Failed: Path A expects 3 turns, found {num_turns}.")
+            is_perfect_so_far = False # IMPERFECTION
+        # Final answer tag and content validation flags already checked perfection in Turn 3
+        elif not found_answer_tag_in_final_assistant_turn or not final_answer_content_validated:
+             # This case should have already set is_perfect_so_far=False in Turn 3 check
+             # print(f"DEBUG: Final state confirms Path A answer/content was imperfect.")
+             pass # Flag already set if needed
+
+    elif expected_path == 'B':
+        if num_turns != 5:
+            # print(f"Format Check Failed: Path B expects 5 turns, found {num_turns}.")
+            is_perfect_so_far = False # IMPERFECTION
+        # Final answer tag and content validation flags already checked perfection in Turn 5
+        elif not found_answer_tag_in_final_assistant_turn or not final_answer_content_validated:
+             # This case should have already set is_perfect_so_far=False in Turn 5 check
+             # print(f"DEBUG: Final state confirms Path B answer/content was imperfect.")
+             pass # Flag already set if needed
+
+    elif expected_path is None and num_turns > 0:
+        # Path was never determined due to error, cannot be perfect if turns exist
+        # print(f"Format Check Failed: Path could not be determined.")
+        # is_perfect_so_far should already be False from Turn 2 failure
+        is_perfect_so_far = False # Explicitly ensure it's false
+
+    # --- Determine Final Score ---
+    final_additive_score = score
+
+    if is_perfect_so_far:
+        final_additive_score = 1.5 
+        # Only return 1.0 if ALL checks passed and the flag remains True
+        print(f"Additive Score Accumulated: {final_additive_score:.2f}")
+        return final_additive_score
+    else:
+        print(f"Additive Score Accumulated: {final_additive_score:.2f}")
+        # Otherwise, return the additive score, capped below 1.0
+        return min(final_additive_score, 1.49)
 
 def trace_agent_optimization_process(solution_str: str, ll_code: str) -> Tuple[List[str], float]:
     """Extract the final pass sequence from the answer tag and calculate overOz.
@@ -518,7 +836,7 @@ def compute_score_format_answer(solution_str: str, ground_truth: Union[str, List
         
         # print(f"[DEBUG] Format reward: {format_reward}, Answer reward: {answer_reward}")
         
-        total_reward = 0.05 * format_reward + 0.95 * answer_reward
+        total_reward = 0.9 * format_reward + 0.1 * answer_reward
         # Ensure reward is within acceptable bounds
         # total_reward = min(max(total_reward, -10.0), 15.0)
         

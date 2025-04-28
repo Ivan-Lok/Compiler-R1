@@ -268,8 +268,18 @@ if __name__ == '__main__':
             prompt += features_text
             
             # 添加一个提示，告诉模型如何在tool_call中使用文件名
-            # prompt += f"\nNote: When calling the analyze_autophase tool, use the exact filename provided above: {filename}"
+            prompt += f"\nNote: When calling the analyze_autophase tool, use the exact filename provided above: {filename}"
             
+            prompt += f'''\n
+Your task is to:
+
+Evaluate the provided Initial Candidate Pass Sequence using the instrcount tool to determine its instruction count improvement compared to the default -Oz optimization.
+If the initial sequence provides a positive improvement (improvement_over_oz > 0), recommend it as the final answer.
+If the initial sequence does not provide a positive improvement (improvement_over_oz <= 0), use the find_best_pass_sequence tool to search for a better sequence.
+If the search finds a sequence with positive improvement (improvement_percentage > 0), recommend that sequence.
+If the search tool fails to find a sequence with positive improvement, recommend the default ['-Oz'] sequence as the safest option.
+Present your reasoning step-by-step using <think> tags and tool interactions using <tool_call> and <tool_response> structure, concluding with the final recommended sequence in an <answer> tag.
+'''
             # Create extra_info with validation source if applicable
             extra_info = {
                 'split': split,

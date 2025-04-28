@@ -10,7 +10,7 @@ export CUDA_VISIBLE_DEVICES=0,1
 
 # 从原始脚本中提取最新的SFT检查点
 sft_model_path="$HOME/outputs/compiler_autotuning_sft"
-latest_checkpoint=$(ls -dt $sft_model_path/global_step_* 2>/dev/null | head -n 1)
+latest_checkpoint=$HOME/outputs/compiler_autotuning_sft/global_step_80
 # 如果未找到检查点，提示用户
 if [ -z "$latest_checkpoint" ]; then
   echo "错误: 未找到SFT训练的检查点！"

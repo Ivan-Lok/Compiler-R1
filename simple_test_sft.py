@@ -123,27 +123,20 @@ def main():
     # 使用聊天格式创建输入
     instruction = f"""
 
-Act as a compiler optimization expert simulating the process of finding an optimal pass sequence for LLVM IR. Your goal is to reduce the total instruction count.
-Your task is to simulate the process of finding a good optimization sequence using <think>, <tool_call>, and <tool_response> steps. The goal is to minimize the final instruction count.
+Act as a compiler optimization expert finding an optimal pass sequence for LLVM IR, aiming to reduce the total instruction count.
 
-IMPORTANT FORMATTING REQUIREMENTS:
-1. You MUST generate EXACTLY 5 rounds of <think>/<tool_call>/<tool_response> cycles - no more, no less.
-2. In each tool call, you MUST use ALL optimization passes applied up to that point in the sequence.
-3. In each round, you MUST first list the passes you plan to apply (like ['--newgvn', '--lower-expect']), then end with "Tool call uses ALL passes applied up to the end of this round."
-4. Your entire response MUST NOT exceed 5192 tokens in length.
-5. After completing [Round 5/5], you must immediately output your final answer in <answer> tags without continuing to any additional rounds.
-
-Process:
-1. Analyze the initial features in `<think>`.
-2. Choose a batch of LLVM optimization passes based on the analysis and previous results (if any) in `<think>`.
-3. Make a `<tool_call>` to `analyze_autophase` with the cumulative pass sequence applied so far.
-4. Use the feature analysis from `<tool_response>` to inform the next `<think>` step.
-5. Repeat steps 1-4 for exactly 5 rounds, following the provided trajectory.
-6. Finally, output the complete target pass sequence (the one used in the final tool call) in `<answer>`.
-
-Initial AutoPhase features:
+The LLVM IR code is represented by autophase features, the initial autophase features are:
 {json.dumps(autophase_features, indent=2)}
 Initial instruction count: 1348
+
+Your task is to:
+
+Evaluate the provided Initial Candidate Pass Sequence using the instrcount tool to determine its instruction count improvement compared to the default -Oz optimization.
+If the initial sequence provides a positive improvement (improvement_over_oz > 0), recommend it as the final answer.
+If the initial sequence does not provide a positive improvement (improvement_over_oz <= 0), use the find_best_pass_sequence tool to search for a better sequence.
+If the search finds a sequence with positive improvement (improvement_percentage > 0), recommend that sequence.
+If the search tool fails to find a sequence with positive improvement, recommend the default ['-Oz'] sequence as the safest option.
+Present your reasoning step-by-step using <think> tags and tool interactions using <tool_call> and <tool_response> structure, concluding with the final recommended sequence in an <answer> tag.
 """
     
     try:

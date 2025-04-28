@@ -1,9 +1,3 @@
-#!/bin/bash
-
-# 确保脚本在 Compiler-R1 环境中运行
-source /root/anaconda3/etc/profile.d/conda.sh
-conda activate Compiler-R1
-
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export BASE_MODEL='Qwen/Qwen2.5-1.5B-Instruct'
 export PROJECT_NAME='compiler_autotuning_qwen2.5-1.5b-instruct'
@@ -11,8 +5,7 @@ export EXPERIMENT_NAME=grpo
 export HYDRA_FULL_ERROR=1
 export CUDA_LAUNCH_BLOCKING=1
 
-# 确保 Ray 使用 Compiler-R1 环境
-export PYTHONPATH=/root/anaconda3/envs/Compiler-R1/bin:$PYTHONPATH
+
 export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/verl/
 
 python3 -m agent_r1.src.main_agent \

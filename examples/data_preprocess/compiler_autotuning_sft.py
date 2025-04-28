@@ -28,7 +28,8 @@ import numpy as np
 from verl.utils.hdfs_io import copy, makedirs
 from typing import List, Dict, Optional, Any
 from agent_r1.tool.tools.comiler_autotuning.raw_tool.get_autophase import get_autophase_obs
-from agent_r1.tool.tools.comiler_autotuning.raw_tool.get_instrcount import GenerateOptimizedLLCode
+from agent_r1.tool.tools.comiler_autotuning.raw_tool.get_instrcount import get_overOz
+from agent_r1.tool.tools.comiler_autotuning.raw_tool.find_best_pass_sequence import find_best_pass_sequence
 from agent_r1.tool.tools.comiler_autotuning.raw_tool.gen_pass_from_number import Actions_LLVM_10_0_0
 from agent_r1.tool.tools.comiler_autotuning.rag_search_tool import RAGSearchTool
 
@@ -277,445 +278,198 @@ def _safe_get_inst_count(features: Optional[Dict]) -> Optional[int]:
 
 def generate_thinking_process(filename: str, initial_autophase: Dict, pass_sequence: List[str]) -> str:
     """
-    Generates a multi-round SFT sample using only the 'analyze_autophase' tool,
-    including an initial -Oz check and final comparison.
+    Generates a SFT sample using the instrcount_tool and find_best_pass_sequence function.
+    Logic:
+    1. Call instrcount_tool with given pass_sequence to check overoz
+    2. If overoz > 0, provide pass_sequence as answer
+    3. If overoz <= 0, call find_best_pass_sequence function up to 5 times until improvement_percentage > 0
+    4. If all attempts fail, fallback to ["-Oz"]
 
     Args:
         filename: LLVM IR filename relative to llvmir_datasets dir.
-        initial_autophase: Initial features of the *original* code.
-        pass_sequence: The sequence guiding the 5 optimization rounds simulation.
+        initial_autophase: Initial features of the original code.
+        pass_sequence: The initial pass sequence to try.
 
     Returns:
         A string containing the full SFT sample.
     """
     result_parts = []
 
-    # --- Initial Setup & Input Validation ---
+    # --- Input Validation ---
     if not filename or initial_autophase is None or not isinstance(pass_sequence, list):
-         return "<error>Invalid input: Filename, initial features, and pass sequence required.</error>"
+        return "<error>Invalid input: Filename, initial features, and pass sequence required.</error>"
     pass_sequence = [str(p) for p in pass_sequence if p]
-    if not pass_sequence: return "<error>Empty pass sequence provided.</error>"
+    if not pass_sequence:
+        return "<error>Empty pass sequence provided.</error>"
 
-    # --- Simulation Setup ---
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    llvmir_base_path = os.path.normpath(os.path.join(script_dir, './llvmir_datasets/'))
-    ll_file_path = os.path.join(llvmir_base_path, filename)
-    llvm_tools_path = os.path.normpath(os.path.join(script_dir, '../../agent_r1/tool/tools/comiler_autotuning/raw_tool/')) # Adjust if needed
+    # --- Setup paths ---
+    llvm_tools_path = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 
+                                      '../../agent_r1/tool/tools/comiler_autotuning/raw_tool/'))
+    llvm_ir_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), './llvmir_datasets/')
+    ll_file_path = os.path.join(llvm_ir_dir, filename)
+    
+    # --- STEP 1: Initial thinking with the proposed pass sequence ---
+    initial_think = f"""<think>
+[Initial Pass Sequence Analysis]
+- Based on the provided autophase features, I'll try the following pass sequence:
+{pass_sequence}
 
-    try:
-        original_ll_code = read_llvm_ir_file(ll_file_path)
-        if original_ll_code is None: raise FileNotFoundError(f"Cannot read: {ll_file_path}")
-    except Exception as e: return f"<error>Failed reading IR '{ll_file_path}': {e}</error>"
-
-    # --- <<< STEP 1: Initial -Oz Check using analyze_autophase >>> ---
-    initial_oz_think = """<think>
-[Initial Baseline Check]
-- Goal: Establish baseline performance and instruction count using standard '-Oz'.
-- Plan: Call 'analyze_autophase' with just '-Oz' to see its effect compared to the original code.
-- The resulting instruction count will be the benchmark.
+- First, I'll use the instrcount tool to check if this sequence provides improvement over -Oz optimization.
+- If improvement_over_oz > 0, I'll use this sequence as my answer.
+- If improvement_over_oz <= 0, I'll call find_best_pass_sequence tool to find a better sequence.
 </think>"""
-    initial_oz_tool_call_args = {"filename": filename, "optimization_passes": ["-Oz"]}
-    initial_oz_tool_call_content = json.dumps({"name": "analyze_autophase", "arguments": initial_oz_tool_call_args}, separators=(',', ':'))
-    initial_oz_tool_call_str = f"<tool_call>\n{initial_oz_tool_call_content}\n</tool_call>"
-    initial_assistant_turn_oz = f"<|im_start|>assistant\n{initial_oz_think}\n{initial_oz_tool_call_str}\n<|im_end|>"
-    result_parts.append(initial_assistant_turn_oz)
 
-    # Simulate user's response for the -Oz check
-    initial_oz_tool_response_dict = {"status": "error", "feature_analysis": "Simulation error for -Oz check"}
-    oz_inst_count_from_tool: Optional[int] = None # Store count from this tool response
-    try:
-        # Simulate tool applying '-Oz' and getting features
-        oz_optimized_code = GenerateOptimizedLLCode(original_ll_code, ['-Oz'], llvm_tools_path)
-        if oz_optimized_code is None: raise ValueError("GenerateOptimizedLLCode failed for -Oz")
-        oz_features = get_autophase_features(oz_optimized_code)
-        if oz_features is None: raise ValueError("get_autophase_features failed for -Oz")
-
-        # Analyze change from initial state
-        oz_analysis_text = analyze_feature_changes(initial_autophase, oz_features)
-        initial_oz_tool_response_dict["status"] = "success"
-        initial_oz_tool_response_dict["feature_analysis"] = oz_analysis_text
-        oz_inst_count_from_tool = _safe_get_inst_count(oz_features) # Extract count
-        if oz_inst_count_from_tool is not None:
-            initial_oz_tool_response_dict["current_total_insts"] = oz_inst_count_from_tool
-        else:
-            # If count extraction fails even if feature generation worked
-            initial_oz_tool_response_dict["feature_analysis"] += " (Warning: Could not extract TotalInsts count)"
-            initial_oz_tool_response_dict["status"] = "error" # Mark as error if count missing
-
-    except Exception as e:
-         error_msg = f"Exception during -Oz analyze_autophase simulation: {e}"
-         initial_oz_tool_response_dict["feature_analysis"] = error_msg
-         print(f"Warning: {error_msg} for {filename}")
-
-    initial_user_turn_oz = f"<|im_start|>user\n<tool_response>\n{json.dumps(initial_oz_tool_response_dict, indent=2)}\n</tool_response>\n<|im_end|>"
-    result_parts.append(initial_user_turn_oz)
-
-
-    # --- <<< STEP 2: Multi-Round Optimization (Using analyze_autophase) >>> ---
-
-    # --- Pad and Distribute the provided 'good' sequence for simulation guidance ---
-    full_pass_sequence_for_sim = list(pass_sequence)
-    total_rounds = 5
-    # (Padding/Distribution logic remains the same as previous version)
-    if len(full_pass_sequence_for_sim) < total_rounds:
-        padding_pass = full_pass_sequence_for_sim[-1] if full_pass_sequence_for_sim else "--instcombine"
-        while len(full_pass_sequence_for_sim) < total_rounds: full_pass_sequence_for_sim.append(padding_pass)
-    n_passes = len(full_pass_sequence_for_sim)
-    passes_per_round = max(1, (n_passes + total_rounds - 1) // total_rounds)
-    assigned_passes_per_round: List[List[str]] = []
-    current_start_index = 0
-    for i in range(total_rounds):
-        current_end_index = min(current_start_index + passes_per_round, n_passes)
-        round_passes = full_pass_sequence_for_sim[current_start_index:current_end_index]
-        if not round_passes and current_start_index < n_passes: round_passes = [full_pass_sequence_for_sim[current_start_index]]; current_end_index += 1
-        elif not round_passes: round_passes = [full_pass_sequence_for_sim[-1]]
-        assigned_passes_per_round.append(round_passes)
-        current_start_index = current_end_index
-        if current_start_index >= n_passes and i < total_rounds - 1:
-             for j in range(i + 1, total_rounds): assigned_passes_per_round.append([full_pass_sequence_for_sim[-1]])
-             break
-
-    # --- State Variables for the multi-round part ---
-    # Analysis text starts from the *result* of the -Oz check
-    previous_analysis_text = initial_oz_tool_response_dict["feature_analysis"]
-    previous_round_passes_added: List[str] = ['-Oz'] # conceptually, the first "previous" step was Oz
-    # Features start from the *original* code before the first optimization round (after Oz check)
-    current_features = initial_autophase
-    current_inst_count_sequence = _safe_get_inst_count(initial_autophase)
-    cumulative_passes_agent: List[str] = [] # Track passes agent adds *during the 5 rounds*
-    final_round_tool_response: Optional[Dict] = None # Store the *entire* tool response dict from the last round
-
-    # --- Loop Through Optimization Rounds 1 to 5 ---
-    for round_idx in range(total_rounds):
-        round_num_display = round_idx + 1
-        current_round_new_passes_agent = assigned_passes_per_round[round_idx]
-        cumulative_passes_agent.extend(current_round_new_passes_agent)
-        all_passes_agent_so_far = list(cumulative_passes_agent)
-
-        # --- 1. Generate Thinking ---
-        thinking_lines = ["<think>"]
-        thinking_lines.append(f"[Optimization Round {round_num_display}/{total_rounds}]")
-        current_inst_str = str(current_inst_count_sequence) if current_inst_count_sequence is not None else "N/A"
-        oz_count_str = str(oz_inst_count_from_tool) if oz_inst_count_from_tool is not None else "N/A"
-
-        if round_idx == 0:
-            thinking_lines.append(f"- State: After checking -Oz baseline (Result: {oz_count_str} instructions).")
-            thinking_lines.append(f"- Current Code InstCount (Original): {current_inst_str}.") # Still original before this round
-            thinking_lines.append("- Goal: Start building a custom sequence to try and beat the -Oz baseline.")
-            thinking_lines.append(f"- Plan (Round 1): Apply initial custom pass(es): {current_round_new_passes_agent}")
-            for p in current_round_new_passes_agent: thinking_lines.append(f"  - {p}: {PASS_DESCRIPTIONS.get(p, DEFAULT_PASS_DESC)}")
-            thinking_lines.append("- Cumulative: Tool call will use these passes.")
-        else:
-            thinking_lines.append(f"- Recap: Round {round_idx} added passes: {previous_round_passes_added}.")
-            thinking_lines.append(f"- Result (Analysis after Round {round_idx}): {previous_analysis_text}")
-            thinking_lines.append(f"- Current InstCount (Sequence): {current_inst_str}.")
-            thinking_lines.append(f"- Baseline InstCount (-Oz): {oz_count_str}.")
-            thinking_lines.append("- Goal: Continue building the optimization sequence.")
-            reasoning = "Proceeding to the next optimization step." # Basic reasoning simulation
-            if "decreased" in previous_analysis_text: reasoning = "Improvement seen. Adding next passes."
-            elif "increased" in previous_analysis_text: reasoning = "Regression seen. Adding next planned passes."
-            elif "unchanged" in previous_analysis_text: reasoning = "No change. Trying next passes."
-            elif "Error" in previous_analysis_text or "error" in previous_analysis_text: reasoning = "Previous step had issues. Attempting next passes."
-            thinking_lines.append(f"- Plan (Round {round_num_display}): {reasoning} Add passes: {current_round_new_passes_agent}")
-            for p in current_round_new_passes_agent: thinking_lines.append(f"  - {p}: {PASS_DESCRIPTIONS.get(p, DEFAULT_PASS_DESC)}")
-            thinking_lines.append(f"- Cumulative: Tool call uses all {len(all_passes_agent_so_far)} passes accumulated in this sequence.")
-
-        thinking_lines.append("\nTool call analyzes the effect of applying the *cumulative* sequence generated so far (compared to previous round's state).")
-        thinking_lines.append("</think>")
-        thinking_content = "\n".join(thinking_lines)
-
-        # --- 2. Generate Tool Call (Using analyze_autophase) ---
-        tool_call_args = {"filename": filename, "optimization_passes": all_passes_agent_so_far}
-        tool_call_content = json.dumps({"name": "analyze_autophase", "arguments": tool_call_args}, separators=(',', ':'))
-        tool_call_str = f"<tool_call>\n{tool_call_content}\n</tool_call>"
-
-        # --- 3. Simulate Tool Execution & Prepare Response ---
-        tool_response_content_dict = {"status": "error", "feature_analysis": "Simulation error before execution"}
-        feature_analysis_this_round = "Error: Simulation step failed"
-        optimized_features_this_round_sim = None
-        try:
-            optimized_code_this_round_sim = GenerateOptimizedLLCode(original_ll_code, all_passes_agent_so_far, llvm_tools_path)
-            if optimized_code_this_round_sim is None: raise ValueError(f"GenerateOptimizedLLCode failed for sequence: {all_passes_agent_so_far}")
-
-            optimized_features_this_round_sim = get_autophase_features(optimized_code_this_round_sim)
-            if optimized_features_this_round_sim is None: raise ValueError("get_autophase_features failed")
-
-            # Compare features from *this* round simulation vs features from *previous* round state
-            feature_analysis_this_round = analyze_feature_changes(current_features, optimized_features_this_round_sim)
-            tool_response_content_dict["status"] = "success"
-            tool_response_content_dict["feature_analysis"] = feature_analysis_this_round
-
-            new_inst_count_sim = _safe_get_inst_count(optimized_features_this_round_sim)
-            if new_inst_count_sim is not None:
-                 tool_response_content_dict["current_total_insts"] = new_inst_count_sim
-                 current_inst_count_sequence = new_inst_count_sim # Update sequence count state
-            else:
-                 feature_analysis_this_round += " (Warning: Could not extract TotalInsts count from tool result)"
-                 tool_response_content_dict["feature_analysis"] = feature_analysis_this_round
-                 # Mark status as error if essential count is missing
-                 tool_response_content_dict["status"] = "error"
-
-        except Exception as e:
-            error_message = f"Error during simulation round {round_num_display}: {str(e)}"
-            print(f"Error details for {filename}, round {round_num_display}: {e}")
-            feature_analysis_this_round = error_message
-            tool_response_content_dict["feature_analysis"] = error_message
-            tool_response_content_dict["status"] = "error"
-            optimized_features_this_round_sim = None
-
-        # Store the *entire response dictionary* for the last round
-        if round_idx == total_rounds - 1:
-            final_round_tool_response = tool_response_content_dict
-
-        # --- Update State for NEXT Iteration ---
-        previous_analysis_text = feature_analysis_this_round
-        previous_round_passes_added = current_round_new_passes_agent
-        if optimized_features_this_round_sim and tool_response_content_dict["status"] == "success":
-            # Only update features if the round was successful AND features were obtained
-            current_features = optimized_features_this_round_sim
-
-        # --- Assemble Turn Strings ---
-        assistant_turn = f"<|im_start|>assistant\n{thinking_content}\n{tool_call_str}\n<|im_end|>"
-        user_turn = f"<|im_start|>user\n<tool_response>\n{json.dumps(tool_response_content_dict, indent=2)}\n</tool_response>\n<|im_end|>"
-        result_parts.append(assistant_turn)
-        result_parts.append(user_turn)
-
-
-    # --- <<< STEP 3: Final Assistant Turn - Comparison and Answer >>> ---
-    final_answer_sequence = cumulative_passes_agent # Default: use the sequence built over 5 rounds
-    final_decision_reasoning = ""
-
-    # Get the final sequence instruction count from the LAST tool response
-    final_sequence_inst_count_from_tool: Optional[int] = None
-    if final_round_tool_response and final_round_tool_response.get("status") == "success":
-        final_sequence_inst_count_from_tool = final_round_tool_response.get("current_total_insts")
-        # If key exists but value is not int (e.g., None), _safe_get_inst_count handles it too
-        if final_sequence_inst_count_from_tool is None:
-             # Attempt to re-parse from features if key was missing but analysis seemed ok
-             # This part is less likely needed if response dict is built correctly
-             pass # For simplicity, rely on current_total_insts key
-
-    final_think_lines = ["<think>", "[Final Decision]"]
-    final_think_lines.append(f"- Completed {total_rounds} optimization rounds.")
-    seq_count_str = str(final_sequence_inst_count_from_tool) if final_sequence_inst_count_from_tool is not None else "N/A (Error or missing)"
-    oz_count_str = str(oz_inst_count_from_tool) if oz_inst_count_from_tool is not None else "N/A (Error or missing)"
-    final_think_lines.append(f"- Final InstCount (Result of {total_rounds}-Round Sequence): {seq_count_str}.")
-    final_think_lines.append(f"- Baseline InstCount (Result of Initial -Oz): {oz_count_str}.")
-
-    comparison_possible = (oz_inst_count_from_tool is not None and final_sequence_inst_count_from_tool is not None)
-
-    if comparison_possible:
-        if oz_inst_count_from_tool < final_sequence_inst_count_from_tool:
-            final_answer_sequence = ['-Oz']
-            final_decision_reasoning = f"- Comparison: Initial '-Oz' ({oz_count_str}) resulted in fewer instructions than the final multi-round sequence ({seq_count_str})."
-            final_think_lines.append(final_decision_reasoning)
-            final_think_lines.append("- Conclusion: Selecting '-Oz' as the final answer.")
-        else:
-            final_decision_reasoning = f"- Comparison: The multi-round sequence ({seq_count_str}) resulted in fewer or equal instructions compared to initial '-Oz' ({oz_count_str})."
-            final_think_lines.append(final_decision_reasoning)
-            final_think_lines.append("- Conclusion: Selecting the multi-round sequence as the final answer.")
-            # final_answer_sequence already defaults to cumulative_passes_agent
-            if not final_answer_sequence: # Ensure it's not empty if chosen
-                 final_answer_sequence = ["--instcombine"] # Fallback
-    # Handle cases where comparison isn't possible
-    elif oz_inst_count_from_tool is None:
-         final_decision_reasoning = "- Comparison Failed: Could not determine baseline count from the initial -Oz tool call."
-         final_think_lines.append(final_decision_reasoning)
-         final_think_lines.append("- Conclusion: Using the result of the multi-round sequence attempt.")
-         if not final_answer_sequence: final_answer_sequence = ["--instcombine"] # Fallback
-    elif final_sequence_inst_count_from_tool is None:
-         final_decision_reasoning = "- Comparison Failed: Could not determine final count from the multi-round sequence's last step."
-         final_think_lines.append(final_decision_reasoning)
-         if oz_inst_count_from_tool is not None:
-             final_think_lines.append("- Conclusion: Defaulting to '-Oz' as its baseline count is known.")
-             final_answer_sequence = ['-Oz']
-         else:
-             final_think_lines.append("- Conclusion: Both initial -Oz and final sequence steps failed to provide counts. Cannot determine the best option.")
-             final_answer_sequence = ["-Oz"] # Default to Oz maybe? Or keep sequence? Let's default to Oz here.
-    else:
-        final_decision_reasoning = "- Comparison Status Uncertain."
-        final_think_lines.append(final_decision_reasoning)
-        final_think_lines.append("- Conclusion: Defaulting to the multi-round sequence attempt.")
-        if not final_answer_sequence: final_answer_sequence = ["--instcombine"] # Fallback
-
-    final_think_lines.append("</think>")
-    final_thinking_content = "\n".join(final_think_lines)
-
-    # Assemble final assistant response
-    final_assistant_answer_parts = [
-        "<|im_start|>assistant",
-        final_thinking_content,
-        f"<answer>\n{final_answer_sequence}\n</answer>", # Use the determined sequence
-        "<|im_end|>"
-    ]
-    result_parts.append("\n".join(final_assistant_answer_parts))
-
-    return "\n".join(result_parts)
-
-def generate_rag_based_sft(autophase_embedding: Dict, ground_truth_sequence: List[str], top_k: int = 3, rag_tool=None) -> str:
-    """
-    Generate SFT data using RAG search workflow:
-    1. Assistant turn: Explanation and RAG tool call
-    2. User turn: Simulated RAG tool response with top_k sequences
-    3. Assistant turn: Thinking process and final answer
-    
-    Args:
-        autophase_embedding: Autophase features dictionary
-        ground_truth_sequence: The known optimal sequence (from dataset)
-        top_k: Number of sequences to retrieve from RAG
-        rag_tool: Optional pre-initialized RAGSearchTool instance
-        
-    Returns:
-        Complete conversation string in SFT format
-    """
-    result_parts = []
-    
-    # --- Assistant Turn 1: Explanation and RAG tool call ---
-    thinking_lines = ["<think>"]
-    thinking_lines.append("[Initial Analysis]")
-    thinking_lines.append("- I have the autophase feature vector for an LLVM IR code.")
-    thinking_lines.append("- Need to find an optimal sequence of LLVM optimization passes to reduce instruction count.")
-    thinking_lines.append("- Step 1: Use RAG search to find similar code patterns and their effective optimization sequences.")
-    thinking_lines.append(f"- Will request top-{top_k} most similar optimization sequences from the database.")
-    thinking_lines.append("- These retrieved sequences will serve as starting points for my analysis.")
-    thinking_lines.append("</think>")
-    
-    # Create tool call for RAG search - use the dictionary directly
-    rag_tool_args = {
-        "autophase_embedding": autophase_embedding,  # Use the dictionary directly
-        "top_k": top_k
+    # --- STEP 2: Call instrcount_tool to check overoz ---
+    instrcount_tool_call_args = {
+        "filename": filename,
+        "optimization_flags": pass_sequence
     }
-    rag_tool_call = json.dumps({"name": "rag_search", "arguments": rag_tool_args}, separators=(',', ':'))
+    instrcount_tool_call_content = json.dumps({"name": "instrcount", "arguments": instrcount_tool_call_args}, separators=(',', ':'))
+    instrcount_tool_call_str = f"<tool_call>\n{instrcount_tool_call_content}\n</tool_call>"
     
-    # Combine thinking and tool call for assistant turn 1
-    assistant_turn_1 = [
-        "<|im_start|>assistant",
-        "\n".join(thinking_lines),
-        f"<tool_call>\n{rag_tool_call}\n</tool_call>",
-        "<|im_end|>"
-    ]
-    result_parts.append("\n".join(assistant_turn_1))
+    initial_assistant_turn = f"<|im_start|>assistant\n{initial_think}\n{instrcount_tool_call_str}\n<|im_end|>"
+    result_parts.append(initial_assistant_turn)
+
+    # --- Actually calculate overoz value using the raw function ---
+    tool_response_dict = {"status": "error", "error": "Error calculating improvement over -Oz"}
+    over_oz_value = None
     
-    # --- User Turn: Simulate RAG search tool response ---
-    
-    # Initialize RAG tool and actually execute it if possible
     try:
-        # Use provided rag_tool instance if available, otherwise create a new one
-        local_rag_tool = rag_tool
-        if local_rag_tool is None:
-            from agent_r1.tool.tools.comiler_autotuning.rag_search_tool import RAGSearchTool
-            local_rag_tool = RAGSearchTool()
+        # Read the LLVM IR code
+        with open(ll_file_path, 'r') as file:
+            ll_code = file.read()
             
-        # Execute RAG search to get similar sequences
-        tool_result = local_rag_tool.execute(rag_tool_args)
-        tool_result_obj = json.loads(tool_result)
+        # Directly calculate overoz using the raw function
+        over_oz_value = get_overOz(ll_code, pass_sequence, llvm_tools_path)
         
-        # Extract retrieved sequences
-        retrieved_sequences = []
-        if "results" in tool_result_obj and len(tool_result_obj["results"]) > 0:
-            for result in tool_result_obj["results"]:
-                sequence = result.get("pass_sequence", [])
-                similarity = result.get("similarity", 0.0)
-                retrieved_sequences.append({
-                    "pass_sequence": sequence,
-                    "similarity": similarity
-                })
-    except Exception as e:
-        print(f"Error executing RAG tool: {e}")
-        # Fallback: Use ground truth and generate some variations
-        retrieved_sequences = [{"pass_sequence": ground_truth_sequence, "similarity": 0.95}]
-        
-        # Generate some random variations for additional sequences
-        # Add up to top_k-1 more sequences
-        all_passes = [action.value for action in Actions_LLVM_10_0_0]
-        for i in range(top_k - 1):
-            # Create a random sequence with 1-5 passes
-            seq_length = random.randint(1, 5)
-            random_seq = [random.choice(all_passes) for _ in range(seq_length)]
-            retrieved_sequences.append({
-                "pass_sequence": random_seq,
-                "similarity": max(0.1, 0.95 - (i+1) * 0.2)  # Decreasing similarity
-            })
-    
-    # Ensure ground truth is included in the results
-    ground_truth_included = False
-    for seq in retrieved_sequences:
-        if seq["pass_sequence"] == ground_truth_sequence:
-            ground_truth_included = True
-            break
-            
-    # If ground truth not already included, replace the last sequence with it
-    if not ground_truth_included and retrieved_sequences:
-        retrieved_sequences[-1] = {
-            "pass_sequence": ground_truth_sequence,
-            "similarity": retrieved_sequences[0]["similarity"] - 0.05  # Slightly less similar than the top result
+        # Create tool response
+        tool_response_dict = {
+            "status": "success",
+            "improvement_over_oz": over_oz_value
         }
-    
-    # Limit to top_k
-    retrieved_sequences = retrieved_sequences[:top_k]
-    
-    # Create tool response
-    tool_response = {
-        "results": retrieved_sequences
-    }
-    
-    # User turn with tool response
-    user_turn = [
-        "<|im_start|>user",
-        f"<tool_response>\n{json.dumps(tool_response, indent=2)}\n</tool_response>",
-        "<|im_end|>"
-    ]
-    result_parts.append("\n".join(user_turn))
-    
-    # --- Assistant Turn 2: Analysis and final answer ---
-    final_thinking_lines = ["<think>"]
-    final_thinking_lines.append("[Analyzing RAG Results]")
-    final_thinking_lines.append(f"- Retrieved {len(retrieved_sequences)} optimization pass sequences from the RAG tool.")
-    
-    # Add analysis of each retrieved sequence
-    for i, seq in enumerate(retrieved_sequences):
-        sequence_str = ", ".join(seq["pass_sequence"])
-        final_thinking_lines.append(f"- Sequence {i+1} (similarity: {seq['similarity']:.4f}): [{sequence_str}]")
         
-        # Add brief analysis based on the sequence content
-        if seq["pass_sequence"] == ground_truth_sequence:
-            seq_analysis = "This sequence appears most promising based on feature similarity."
-            # Add some reasoning about specific passes
-            if len(seq["pass_sequence"]) > 0:
-                for pass_name in seq["pass_sequence"][:2]:  # Just analyze first couple of passes
-                    pass_desc = PASS_DESCRIPTIONS.get(pass_name, DEFAULT_PASS_DESC)
-                    final_thinking_lines.append(f"  - {pass_name}: {pass_desc}")
-            final_thinking_lines.append(f"  - Analysis: {seq_analysis}")
+    except Exception as e:
+        error_msg = f"Exception during improvement calculation: {e}"
+        tool_response_dict = {"status": "error", "error": error_msg}
+        print(f"Warning: {error_msg} for {filename}")
+
+    # --- First user turn with instrcount_tool response ---
+    initial_user_turn = f"<|im_start|>user\n<tool_response>\n{json.dumps(tool_response_dict, indent=2)}\n</tool_response>\n<|im_end|>"
+    result_parts.append(initial_user_turn)
+
+    # --- STEP 3: Check overoz and decide next action ---
+    current_pass_sequence = pass_sequence
     
-    # Decision explanation (always choose ground truth for SFT data generation)
-    chosen_seq_idx = -1
-    for i, seq in enumerate(retrieved_sequences):
-        if seq["pass_sequence"] == ground_truth_sequence:
-            chosen_seq_idx = i
+    if tool_response_dict.get("status") == "success" and tool_response_dict.get("improvement_over_oz", 0) > 0:
+        # Improvement over -Oz is positive, use the initial pass sequence
+        final_thinking = f"""<think>
+[Result Analysis]
+- The instrcount_tool reports an improvement_over_oz value of {tool_response_dict.get("improvement_over_oz")}.
+- Since this value is positive, the pass sequence provides better optimization than -Oz.
+- I'll use this pass sequence as my final answer.
+</think>"""
+        
+        final_assistant_turn = f"<|im_start|>assistant\n{final_thinking}\n<answer>\n{current_pass_sequence}\n</answer>\n<|im_end|>"
+        result_parts.append(final_assistant_turn)
+        return "\n".join(result_parts)
+    
+    # --- STEP 4: If overoz <= 0, call find_best_pass_sequence up to 5 times ---
+    max_attempts = 1
+    current_attempt = 0
+    best_improvement = 0
+    best_sequence = None
+    
+    while current_attempt < max_attempts:
+        current_attempt += 1
+        
+        # Generate thinking for this attempt
+        find_best_thinking = f"""<think>
+[Finding Better Pass Sequence]
+- The previous sequence did not provide improvement over -Oz.
+- Calling find_best_pass_sequence tool to find a better sequence.
+</think>"""
+        
+        # Call find_best_pass_sequence_tool
+        find_best_args = {"filename": filename}
+        find_best_tool_call_content = json.dumps({"name": "find_best_pass_sequence", "arguments": find_best_args}, separators=(',', ':'))
+        find_best_tool_call_str = f"<tool_call>\n{find_best_tool_call_content}\n</tool_call>"
+        
+        find_best_assistant_turn = f"<|im_start|>assistant\n{find_best_thinking}\n{find_best_tool_call_str}\n<|im_end|>"
+        result_parts.append(find_best_assistant_turn)
+        
+        # Actually call find_best_pass_sequence function
+        find_best_response_dict = {"status": "error", "error": "Error finding best pass sequence"}
+        improvement_percentage = None
+        recommended_sequence = None
+        
+        try:
+            # Directly call the raw function
+            best_result = find_best_pass_sequence(ll_file_path, llvm_tools_path=llvm_tools_path)
+
+            if best_result and 'best_pass_sequence' in best_result and 'improvement_percentage' in best_result:
+                recommended_sequence = best_result['best_pass_sequence']
+                improvement_percentage = best_result['improvement_percentage']
+                
+                find_best_response_dict = {
+                    "status": "success",
+                    "best_pass_sequence": recommended_sequence,
+                    "improvement_percentage": improvement_percentage
+                }
+                
+                # Keep track of best sequence found so far
+                if improvement_percentage is not None and improvement_percentage > best_improvement:
+                    best_improvement = improvement_percentage
+                    best_sequence = recommended_sequence
+            else:
+                find_best_response_dict = {
+                    "status": "error", 
+                    "error": "Invalid result from find_best_pass_sequence function"
+                }
+                
+        except Exception as e:
+            error_msg = f"Exception during find_best_pass_sequence call (attempt {current_attempt}): {e}"
+            find_best_response_dict = {"status": "error", "error": error_msg}
+            print(f"Warning: {error_msg} for {filename}")
+        
+        # User turn with find_best_pass_sequence_tool response
+        find_best_user_turn = f"<|im_start|>user\n<tool_response>\n{json.dumps(find_best_response_dict, indent=2)}\n</tool_response>\n<|im_end|>"
+        result_parts.append(find_best_user_turn)
+        
+        # Check if we found a good sequence
+        if find_best_response_dict.get("status") == "success" and find_best_response_dict.get("improvement_percentage", 0) > 0:
+            current_pass_sequence = find_best_response_dict.get("best_pass_sequence", current_pass_sequence)
+            break
+            
+        # If this was the last attempt and we failed, but we had a previous best sequence
+        if current_attempt == max_attempts and best_improvement > 0 and best_sequence:
+            current_pass_sequence = best_sequence
+            break
+            
+        # If this was the last attempt and we still don't have a good sequence, fallback to -Oz
+        if current_attempt == max_attempts:
+            current_pass_sequence = ["-Oz"]  # Fallback to -Oz
             break
     
-    if chosen_seq_idx >= 0:
-        final_thinking_lines.append(f"\n- Decision: Selecting sequence {chosen_seq_idx+1} because:")
-        final_thinking_lines.append("  1. It has good similarity to our input code's features")
-        final_thinking_lines.append("  2. The combination of passes addresses key optimization opportunities")
-        final_thinking_lines.append("  3. The passes complement each other well in addressing different aspects")
+    # --- STEP 5: Final answer with the best sequence found or fallback ---
+    if current_pass_sequence == ["-Oz"]:
+        final_thinking = f"""<think>
+[Final Decision - Fallback to -Oz]
+- After attempting with find_best_pass_sequence tool, no sequence with positive improvement was found.
+- Falling back to the standard -Oz optimization as the final answer.
+</think>"""
     else:
-        # This shouldn't happen with our logic, but just in case
-        final_thinking_lines.append("\n- Decision: None of the retrieved sequences are optimal.")
-        final_thinking_lines.append("  Creating a custom sequence based on best practices.")
+        final_thinking = f"""<think>
+[Final Decision - Found Improved Sequence]
+- Found a pass sequence with positive improvement: {best_improvement if best_improvement > 0 else 'positive'}.
+- Using this sequence as the final answer.
+</think>"""
     
-    final_thinking_lines.append("</think>")
+    final_assistant_turn = f"<|im_start|>assistant\n{final_thinking}\n<answer>\n{current_pass_sequence}\n</answer>\n<|im_end|>"
+    result_parts.append(final_assistant_turn)
     
-    # Final assistant turn
-    final_assistant_turn = [
-        "<|im_start|>assistant",
-        "\n".join(final_thinking_lines),
-        f"<answer>\n{ground_truth_sequence}\n</answer>",
-        "<|im_end|>"
-    ]
-    result_parts.append("\n".join(final_assistant_turn))
-    
+    # print("\n".join(result_parts))
     return "\n".join(result_parts)
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -820,44 +574,20 @@ The LLVM IR code is represented by autophase features, the initial autophase fea
 {formatted_features}
 ```
 Initial instruction count: {initial_inst_count}
+
+Your task is to:
+
+Evaluate the provided Initial Candidate Pass Sequence using the instrcount tool to determine its instruction count improvement compared to the default -Oz optimization.
+If the initial sequence provides a positive improvement (improvement_over_oz > 0), recommend it as the final answer.
+If the initial sequence does not provide a positive improvement (improvement_over_oz <= 0), use the find_best_pass_sequence tool to search for a better sequence.
+If the search finds a sequence with positive improvement (improvement_percentage > 0), recommend that sequence.
+If the search tool fails to find a sequence with positive improvement, recommend the default ['-Oz'] sequence as the safest option.
+Present your reasoning step-by-step using <think> tags and tool interactions using <tool_call> and <tool_response> structure, concluding with the final recommended sequence in an <answer> tag.
 """
             
-            # 根据命令行参数选择SFT数据生成方法
-            if args.use_rag:
-                # 使用RAG搜索工具生成SFT数据
-                if args.verbose:
-                    print(f"\nProcessing {filename} with RAG-based approach...")
-                
-                try:
-                    full_process = generate_rag_based_sft(
-                        autophase_embedding=autophase_embedding,
-                        ground_truth_sequence=pass_sequence,
-                        top_k=args.top_k,
-                        rag_tool=rag_tool
-                    )
-                    if args.verbose:
-                        print(f"Successfully generated RAG-based SFT data for {filename}")
-                except Exception as e:
-                    print(f"\nError generating RAG-based SFT data for {filename}: {e}")
-                    print("Falling back to simple approach...")
-                    full_process = [
-                        "<|im_start|>assistant",
-                        f"<answer>\n{pass_sequence}\n</answer>", # Use the determined sequence
-                        "<|im_end|>"
-                    ]
-                    full_process = "\n".join(full_process)
-            else:
-                # 使用简单方法生成SFT数据
-                if args.verbose:
-                    print(f"\nProcessing {filename} with simple approach...")
-                
-                full_process = [
-                    "<|im_start|>assistant",
-                    f"<answer>\n{pass_sequence}\n</answer>", # Use the determined sequence
-                    "<|im_end|>"
-                ]
-                full_process = "\n".join(full_process)
-            print(full_process)
+            # 生成思考过程和工具调用
+            full_process = generate_thinking_process(filename, autophase_embedding, pass_sequence)
+
             # 创建记录
             record = {
                 'question': question,
