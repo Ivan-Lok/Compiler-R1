@@ -268,7 +268,7 @@ if __name__ == '__main__':
             prompt += features_text
             
             # 添加一个提示，告诉模型如何在tool_call中使用文件名
-            prompt += f"\nNote: When calling the analyze_autophase tool, use the exact filename provided above: {filename}"
+            prompt += f"\nNote: When calling the 'instrcount' and 'find_best_pass_sequence' tools, use the exact filename provided above: {filename}"
             
             prompt += f'''\n
 Your task is to:

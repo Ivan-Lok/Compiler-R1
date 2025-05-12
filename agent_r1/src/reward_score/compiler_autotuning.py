@@ -836,7 +836,7 @@ def compute_score_format_answer(solution_str: str, ground_truth: Union[str, List
         
         # print(f"[DEBUG] Format reward: {format_reward}, Answer reward: {answer_reward}")
         
-        total_reward = 0.9 * format_reward + 0.1 * answer_reward
+        total_reward = 0.5 * format_reward + 0.5 * answer_reward
         # Ensure reward is within acceptable bounds
         # total_reward = min(max(total_reward, -10.0), 15.0)
         

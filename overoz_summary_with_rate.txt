@@ -1,0 +1,7 @@
+Dataset                                  | Average OverOz  | Success Rate (%)  
+-----------------------------------------|-----------------|-------------------
+validation_val-cbench.parquet            | 0.037711        |             45.45%
+validation_val-mibench.parquet           | 0.038410        |             47.50%
+validation_val-blas.parquet              | 0.031387        |             58.62%
+validation_val-opencv.parquet            | 0.037720        |             53.12%
+validation_val-chstone.parquet           | 0.029736        |             41.66%

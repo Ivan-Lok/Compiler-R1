@@ -1,22 +1,13 @@
-#!/bin/bash
-set -x
-
-# 确保脚本在 Compiler-R1 环境中运行
-source /root/anaconda3/etc/profile.d/conda.sh
-conda activate Compiler-R1
-
-# 设置环境变量
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export HYDRA_FULL_ERROR=1
 export CUDA_LAUNCH_BLOCKING=1
-# 限制只使用GPU 0和GPU 1
 export CUDA_VISIBLE_DEVICES=0,1
 
 # 默认参数
 nproc_per_node=2  # 修改为只使用2个GPU
 base_model="Qwen/Qwen2.5-1.5B-Instruct"
 project_name="compiler_autotuning_qwen"
-sft_output_dir="$HOME/outputs/compiler_autotuning_sft"
+sft_output_dir="$HOME/outputs/compiler_autotuning_sft/1_5B/"
 sft_steps=1000
 grpo_steps=500
 
@@ -54,9 +45,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# 确保 Ray 使用 Compiler-R1 环境
-export PYTHONPATH=/root/anaconda3/envs/Compiler-R1/bin:$PYTHONPATH
-
 # 设置实验名称
 sft_experiment_name="sft-$(basename $base_model)"
 grpo_experiment_name="grpo-after-sft-$(basename $base_model)"
@@ -71,7 +59,7 @@ if [ -f "$HOME/data/compiler_autotuning_sft/train.parquet" ] && \
         echo "==== 第1步: 重新准备SFT数据集 ===="
         echo "===================================================================="
         mkdir -p $HOME/data/compiler_autotuning_sft
-        export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
+        export PYTHONPATH=/root/Agent-R1_qwertyuiop/Agent-R1/
         python3 -m examples.data_preprocess.compiler_autotuning_sft \
           --data_file=examples/data_preprocess/train_random200max_LLM_new.csv \
           --local_dir=$HOME/data/compiler_autotuning_sft \
@@ -85,7 +73,7 @@ else
     echo "==== 第1步: 准备SFT数据集 ===="
     echo "===================================================================="
     mkdir -p $HOME/data/compiler_autotuning_sft
-    export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
+    export PYTHONPATH=/root/Agent-R1_qwertyuiop/Agent-R1/
     python3 -m examples.data_preprocess.compiler_autotuning_sft \
       --use_rag \
       --llvm_ir_dir=examples/data_preprocess/llvmir_datasets \
@@ -105,9 +93,7 @@ if [ ! -z "$latest_checkpoint" ]; then
         echo "===================================================================="
         # 确保SFT输出目录存在
         mkdir -p $sft_output_dir
-        export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/verl
-        export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
+        
         torchrun --standalone --nnodes=1 --nproc_per_node=$nproc_per_node \
           -m verl.trainer.fsdp_sft_trainer \
           data.train_files=$HOME/data/compiler_autotuning_sft/train.parquet \
@@ -145,7 +131,7 @@ else
     echo "===================================================================="
     # 确保SFT输出目录存在
     mkdir -p $sft_output_dir
-    export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/verl
+    export PYTHONPATH=/root/Agent-R1_qwertyuiop/Agent-R1/verl
     export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
     torchrun --standalone --nnodes=1 --nproc_per_node=$nproc_per_node \
@@ -198,7 +184,7 @@ if [ -f "$HOME/data/compiler_autotuning_grpo/train.parquet" ] && \
     read -p "是否重新构建GRPO数据集？(y/n): " rebuild_grpo
     if [ "$rebuild_grpo" = "y" ]; then
         echo "准备增强版GRPO数据..."
-        export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
+        export PYTHONPATH=/root/Agent-R1_qwertyuiop/Agent-R1/
         python3 -m examples.data_preprocess.compiler_autotuning \
           --data_file=examples/data_preprocess/train_random200max_LLM_new.csv \
           --local_dir=$HOME/data/compiler_autotuning_grpo \
@@ -215,7 +201,7 @@ if [ -f "$HOME/data/compiler_autotuning_grpo/train.parquet" ] && \
     fi
 else
     echo "准备增强版GRPO数据..."
-    export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/
+    export PYTHONPATH=/root/Agent-R1_qwertyuiop/Agent-R1/
     python3 -m examples.data_preprocess.compiler_autotuning \
           --data_file=examples/data_preprocess/train_random200max_LLM_new.csv \
           --local_dir=$HOME/data/compiler_autotuning_grpo \
@@ -229,10 +215,6 @@ else
                       examples/data_preprocess/val-tensorflow.csv
 fi
 
-# GRPO阶段使用4个GPU (0,1,2,3)
-export PYTHONPATH=/root/Agent-R1_phl/Agent-R1/verl/
-export CUDA_VISIBLE_DEVICES=0,1
-# 运行GRPO训练，使用SFT训练好的模型
 python3 -m agent_r1.src.main_agent \
   algorithm.adv_estimator=grpo \
   data.train_files=$HOME/data/compiler_autotuning_grpo/train.parquet \
@@ -281,6 +263,6 @@ python3 -m agent_r1.src.main_agent \
   trainer.test_freq=1 \
   trainer.total_epochs=1 \
   \
-  tool.env='optimizer'
-  # trainer.total_training_steps=165 \
-echo "完成SFT和GRPO训练流程！" 
+  tool.env='optimizer' \
+  trainer.total_training_steps=40
+echo "Finished" 
