@@ -1,21 +1,4 @@
 #!/usr/bin/env python
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""
-将编译器自动调优数据集预处理为SFT格式
-"""
-
 import os
 import pandas as pd
 import datasets
@@ -58,7 +41,7 @@ def get_autophase_features(ll_code: Optional[str]) -> Optional[Dict[str, Any]]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_file', default='/root/Agent-R1_qwertyuiop/Agent-R1/examples/data_preprocess/ga_best_pass_sequences_vs_original_results.csv',
+    parser.add_argument('--data_file', default='/PATH_PLACEHOLDER/NIPS_Material/examples/data_preprocess/Experiment_3.csv',
                         help='Path to the compiler autotuning data CSV file')
     parser.add_argument('--llvm_ir_dir', required=True, # Made required
                         help='Directory containing LLVM IR files')

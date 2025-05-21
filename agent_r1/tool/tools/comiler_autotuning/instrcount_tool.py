@@ -14,7 +14,7 @@ class InstrCountTool(Tool):
     """
     
     def __init__(self, llvm_tools_path=os.path.join(os.path.dirname(__file__), 'raw_tool'), 
-                llvm_ir_dir="/root/Agent-R1_qwertyuiop/Agent-R1/examples/data_preprocess/llvmir_datasets/"
+                llvm_ir_dir="/PATH_PLACEHOLDER/NIPS_Material/examples/data_preprocess/llvmir_datasets/"
                 ):
         """
         Initialize the tool for counting instructions in LLVM IR code

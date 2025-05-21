@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
+# Copyright 2024 XXX and/or its affiliates
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,8 +27,6 @@ from tqdm import tqdm
 import numpy as np
 from verl.utils.hdfs_io import copy, makedirs
 from agent_r1.tool.tools.comiler_autotuning.raw_tool.get_autophase import get_autophase_obs
-from agent_r1.tool.tools.comiler_autotuning.raw_tool.gen_pass_from_number import Actions_LLVM_10_0_0
-
 
 def read_llvm_ir_file(file_path):
     """
@@ -67,22 +65,6 @@ def get_autophase_features(ll_code):
         return None
 
 
-def get_all_passes():
-    """
-    获取所有可用的LLVM优化passes
-    
-    Returns:
-        包含pass名称和值的列表
-    """
-    all_passes = []
-    for action in Actions_LLVM_10_0_0:
-        all_passes.append({
-            "name": action.name,
-            "pass": action.value
-        })
-    return all_passes
-
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_file', default='compiler_autotuning_data.csv',
@@ -95,7 +77,7 @@ if __name__ == '__main__':
                         help='Local directory to save the processed data')
     parser.add_argument('--hdfs_dir', default=None,
                         help='HDFS directory to save the processed data')
-    parser.add_argument('--test_ratio', type=float, default=0.001,
+    parser.add_argument('--test_ratio', type=float, default=0.0000001,
                         help='Ratio of data to use for testing')
     parser.add_argument('--max_samples', type=int, default=None,
                         help='Maximum number of samples to process')
@@ -135,10 +117,6 @@ if __name__ == '__main__':
     if args.max_samples is not None and args.max_samples < len(main_df):
         main_df = main_df.sample(n=args.max_samples, random_state=args.seed)
         print(f"Limited main dataset to {len(main_df)} samples")
-    
-    # 获取所有可用的优化passes
-    all_passes = get_all_passes()
-    print(f"Found {len(all_passes)} available optimization passes")
     
     # Process the main dataframe for training and testing
     def process_dataframe(df, llvm_ir_dir=None):
@@ -233,13 +211,6 @@ if __name__ == '__main__':
     
     # Instruction template
     instruction_following = f"""Act as a compiler optimization expert finding an optimal pass sequence for LLVM IR, aiming to reduce the total instruction count."""
-
-    # 添加所有可用passes的信息到指令中
-    # passes_info = "\n\n可用的优化passes:\n"
-    # for i, pass_info in enumerate(all_passes):
-    #     passes_info += f"{i}. {pass_info['pass']}\n"
-    
-    # instruction_following += passes_info
 
     # Process each data item
     def make_map_fn(split, val_source=None):

@@ -84,8 +84,8 @@ def read_llvm_ir_file(file_path: str) -> Optional[str]:
 def parse_args():
     parser = argparse.ArgumentParser(description='Run batch inference on Parquet data and calculate OverOz.')
     parser.add_argument('--input-file', type=str, required=True, help='Path to the input Parquet file')
-    parser.add_argument('--llvm-ir-dir', type=str, default='/root/Agent-R1_qwertyuiop/Agent-R1/examples/data_preprocess/llvmir_datasets/', help='Base directory containing the LLVM IR files')
-    parser.add_argument('--llvm-tools-path', type=str, default="/root/Agent-R1_qwertyuiop/Agent-R1/agent_r1/tool/tools/comiler_autotuning/raw_tool/", help='Path to LLVM tools directory')
+    parser.add_argument('--llvm-ir-dir', type=str, default='/PATH_PLACEHOLDER/NIPS_Material/examples/data_preprocess/llvmir_datasets/', help='Base directory containing the LLVM IR files')
+    parser.add_argument('--llvm-tools-path', type=str, default="/PATH_PLACEHOLDER/NIPS_Material/agent_r1/tool/tools/comiler_autotuning/raw_tool/", help='Path to LLVM tools directory')
     parser.add_argument('--env', type=str, default=default_config.ENV, help='Environment for tool selection')
     parser.add_argument('--api-key', type=str, default=default_config.OPENAI_API_KEY, help='OpenAI API key')
     parser.add_argument('--api-base', type=str, default=default_config.OPENAI_API_BASE, help='OpenAI API base URL')

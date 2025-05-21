@@ -1,21 +1,4 @@
 #!/usr/bin/env python
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""
-将编译器自动调优数据集预处理为SFT格式
-"""
-
 import os
 import pandas as pd
 import datasets
@@ -30,139 +13,7 @@ from typing import List, Dict, Optional, Any
 from agent_r1.tool.tools.comiler_autotuning.raw_tool.get_autophase import get_autophase_obs
 from agent_r1.tool.tools.comiler_autotuning.raw_tool.get_instrcount import get_overOz
 from agent_r1.tool.tools.comiler_autotuning.raw_tool.find_best_pass_sequence import find_best_pass_sequence
-from agent_r1.tool.tools.comiler_autotuning.raw_tool.gen_pass_from_number import Actions_LLVM_10_0_0
-from agent_r1.tool.tools.comiler_autotuning.rag_search_tool import RAGSearchTool
 
-# LLVM优化pass的功能描述，帮助生成思考过程
-PASS_DESCRIPTIONS = {
-    "--add-discriminators": "Add discriminators for better debug info.",
-    "--adce": "Aggressively eliminate dead code.",
-    "--aggressive-instcombine": "Aggressive instruction combining.",
-    "--alignment-from-assumptions": "Optimize memory alignment based on assumptions.",
-    "--always-inline": "Inline all always_inline functions.",
-    "--argpromotion": "Promote arguments from byref to byval.",
-    "--attributor": "Propagate attributes across modules.",
-    "--barrier": "Place barriers before code generation.",
-    "--bdce": "Bit-level dead code elimination.",
-    "--break-crit-edges": "Break critical edges to simplify CFG.",
-    "--simplifycfg": "Simplify the control flow graph.",
-    "--callsite-splitting": "Split indirect call sites based on constants.",
-    "--called-value-propagation": "Propagate called values at indirect call sites.",
-    "--canonicalize-aliases": "Canonicalize aliases for better analysis.",
-    "--consthoist": "Hoist constants to higher scopes.",
-    "--constmerge": "Merge duplicate constants.",
-    "--constprop": "Simple constant propagation.",
-    "--coro-cleanup": "Remove coroutine scheduling remnants.",
-    "--coro-early": "Early coroutine transformation.",
-    "--coro-elide": "Remove unnecessary coroutine constructs.",
-    "--coro-split": "Split coroutines into multiple functions.",
-    "--correlated-propagation": "Propagate correlated value info.",
-    "--cross-dso-cfi": "Cross-DSO control flow integrity.",
-    "--deadargelim": "Remove unused function arguments.",
-    "--dce": "Dead code elimination.",
-    "--die": "Dead instruction elimination.",
-    "--dse": "Dead store elimination.",
-    "--reg2mem": "Convert registers to stack memory references.",
-    "--div-rem-pairs": "Optimize division and remainder pairs.",
-    "--early-cse-memssa": "Early CSE based on memory SSA.",
-    "--early-cse": "Early common subexpression elimination.",
-    "--elim-avail-extern": "Convert available external globals to definitions.",
-    "--ee-instrument": "Instrument exception handling for stack space.",
-    "--flattencfg": "Flatten the control flow graph.",
-    "--float2int": "Optimize floating-point to integer computations.",
-    "--forceattrs": "Force setting function attributes.",
-    "--inline": "Inline function code at call sites.",
-    "--insert-gcov-profiling": "Insert GCOV-compatible instrumentation.",
-    "--gvn-hoist": "Hoist redundant expressions.",
-    "--gvn": "Global value numbering.",
-    "--globaldce": "Global dead code elimination.",
-    "--globalopt": "Global variable optimization.",
-    "--globalsplit": "Split global variables into fragments.",
-    "--guard-widening": "Widen guard conditions.",
-    "--hotcoldsplit": "Split hot and cold paths.",
-    "--ipconstprop": "Interprocedural constant propagation.",
-    "--ipsccp": "Interprocedural sparse conditional constant propagation.",
-    "--indvars": "Canonicalize loop induction variables.",
-    "--irce": "Inductive range check elimination.",
-    "--infer-address-spaces": "Infer address spaces.",
-    "--inferattrs": "Infer attributes for unknown functions.",
-    "--inject-tli-mappings": "Inject target library info mappings.",
-    "--instsimplify": "Remove redundant instructions.",
-    "--instcombine": "Combine instructions into simpler forms.",
-    "--instnamer": "Assign names to unnamed instructions.",
-    "--jump-threading": "Thread conditional jumps.",
-    "--lcssa": "Convert loops to loop-closed SSA form.",
-    "--licm": "Move loop-invariant code out of loops.",
-    "--libcalls-shrinkwrap": "Optimize library call wrappers.",
-    "--load-store-vectorizer": "Vectorize adjacent loads and stores.",
-    "--loop-data-prefetch": "Prefetch data in loops.",
-    "--loop-deletion": "Delete useless loops.",
-    "--loop-distribute": "Distribute loops for parallelism.",
-    "--loop-fusion": "Fuse loops to reduce overhead.",
-    "--loop-guard-widening": "Widen loop guard conditions.",
-    "--loop-idiom": "Recognize and replace common idioms in loops.",
-    "--loop-instsimplify": "Simplify instructions in loops.",
-    "--loop-interchange": "Interchange nested loops.",
-    "--loop-load-elim": "Eliminate redundant loads in loops.",
-    "--loop-predication": "Convert branches in loops to selects.",
-    "--loop-reroll": "Reroll unrolled loops.",
-    "--loop-rotate": "Rotate loops for better execution.",
-    "--loop-simplifycfg": "Simplify loop control flow graph.",
-    "--loop-simplify": "Canonicalize loop form.",
-    "--loop-sink": "Sink instructions in loops.",
-    "--loop-reduce": "Loop strength reduction.",
-    "--loop-unroll-and-jam": "Unroll and jam nested loops.",
-    "--loop-unroll": "Unroll loops.",
-    "--loop-unswitch": "Extract conditions from loops.",
-    "--loop-vectorize": "Vectorize loops.",
-    "--loop-versioning-licm": "Create loop versions for LICM.",
-    "--loop-versioning": "Create multiple loop versions.",
-    "--loweratomic": "Lower atomic instructions.",
-    "--lower-constant-intrinsics": "Lower constant intrinsics.",
-    "--lower-expect": "Lower llvm.expect intrinsics.",
-    "--lower-guard-intrinsic": "Lower guard intrinsics.",
-    "--lowerinvoke": "Lower invoke and unwind instructions.",
-    "--lower-matrix-intrinsics": "Lower matrix operation intrinsics.",
-    "--lowerswitch": "Lower switch instructions.",
-    "--lower-widenable-condition": "Lower widenable conditions.",
-    "--memcpyopt": "Optimize memory copy operations.",
-    "--mergefunc": "Merge duplicate functions.",
-    "--mergeicmps": "Merge consecutive compare instructions.",
-    "--mldst-motion": "Move memory load/store operations.",
-    "--sancov": "Instrument sanitizer coverage.",
-    "--name-anon-globals": "Name anonymous global variables.",
-    "--nary-reassociate": "Reassociate n-ary expressions.",
-    "--newgvn": "New global value numbering.",
-    "--pgo-memop-opt": "Profile-guided memory operation optimization.",
-    "--partial-inliner": "Partially inline hot paths.",
-    "--partially-inline-libcalls": "Partially inline library calls.",
-    "--post-inline-ee-instrument": "Instrument exception handling after inlining.",
-    "--functionattrs": "Infer function attributes.",
-    "--mem2reg": "Convert memory references to registers.",
-    "--prune-eh": "Remove unreachable exception handling code.",
-    "--reassociate": "Reassociate expressions.",
-    "--redundant-dbg-inst-elim": "Remove redundant debug instructions.",
-    "--rpo-functionattrs": "Infer function attributes in reverse postorder.",
-    "--rewrite-statepoints-for-gc": "Rewrite statepoints for garbage collection.",
-    "--sccp": "Sparse conditional constant propagation.",
-    "--slp-vectorizer": "Superword-level parallelism vectorization.",
-    "--sroa": "Scalar replacement of aggregates.",
-    "--scalarizer": "Convert vector operations to scalar operations.",
-    "--separate-const-offset-from-gep": "Separate constant offsets from GEP instructions.",
-    "--simple-loop-unswitch": "Simplified loop unswitching.",
-    "--sink": "Sink instructions to their use points.",
-    "--speculative-execution": "Speculatively execute instructions.",
-    "--slsr": "Straight-line strength reduction.",
-    "--strip-dead-prototypes": "Remove unused function prototypes.",
-    "--strip-debug-declare": "Remove debug declarations.",
-    "--strip-nondebug": "Remove all non-debug information.",
-    "--strip": "Remove all symbol information.",
-    "--tailcallelim": "Eliminate tail calls.",
-    "--mergereturn": "Merge multiple return points into one.",
-    "-Oz": "Optimize aggressively for size."
-}
-
-DEFAULT_PASS_DESC = "General optimization pass."
 
 def read_llvm_ir_file(file_path):
     """
@@ -198,81 +49,6 @@ def get_autophase_features(ll_code):
     except Exception as e:
         print(f"Error getting autophase features: {e}")
         return None
-
-def analyze_feature_changes(prev_features_dict, new_features_dict):
-    """
-    分析特征变化，为下一轮优化提供依据
-    
-    Args:
-        prev_features_dict: 上一轮的特征（字典格式）
-        new_features_dict: 新的特征（字典格式）
-        
-    Returns:
-        特征变化分析
-    """
-    # 检查输入格式
-    if not isinstance(prev_features_dict, dict) or not isinstance(new_features_dict, dict):
-        return "无法比较特征变化：输入格式不正确"
-    
-    analysis = []
-    try:
-        # 找出所有变化的特征
-        changed_features = []
-        
-        # 检查两个字典中共有的键
-        common_keys = set(prev_features_dict.keys()) & set(new_features_dict.keys())
-        for key in common_keys:
-            if prev_features_dict[key] != new_features_dict[key]:
-                change = new_features_dict[key] - prev_features_dict[key]
-                direction = "increase" if change > 0 else "decrease"
-                changed_features.append((key, abs(change), direction, change))
-        
-        # 按变化幅度排序，取前5个变化最大的特征
-        changed_features.sort(key=lambda x: x[1], reverse=True)
-        top_changes = changed_features[:5]
-        
-        # 生成分析文本：只输出变化最大的前5个特征
-        for feature, change_abs, direction, change in top_changes:
-            analysis.append(f"{feature}: {prev_features_dict[feature]} -> {new_features_dict[feature]} ({direction} {change_abs})")
-        
-        # 添加TotalInsts的变化情况
-        if "TotalInsts" in common_keys:
-            total_insts_change = new_features_dict["TotalInsts"] - prev_features_dict["TotalInsts"]
-            if total_insts_change > 0:
-                analysis.append(f"Total InstCount increased by {total_insts_change}")
-            elif total_insts_change < 0:
-                analysis.append(f"Total InstCount decreased by {abs(total_insts_change)}")
-            else:
-                analysis.append("Total InstCount unchanged")
-
-        # 特殊情况：无显著变化
-        if not analysis:
-            # 检查总指令数
-            if "TotalInsts" in common_keys:
-                change = new_features_dict["TotalInsts"] - prev_features_dict["TotalInsts"]
-                if change != 0:
-                    direction = "increase" if change > 0 else "decrease"
-                    analysis.append(f"Total InstCount {direction} by {abs(change)}")
-                else:
-                    analysis.append("Feature changes are not obvious")
-            else:
-                analysis.append("Feature changes are not obvious")
-                
-    except Exception as e:
-        analysis.append(f"Feature analysis error: {e}")
-    
-    return ", ".join(analysis) if analysis else "Feature changes are not obvious"
-
-
-# --- Helper to safely get instruction count ---
-def _safe_get_inst_count(features: Optional[Dict]) -> Optional[int]:
-     """Safely extracts TotalInsts, returning None if unavailable or not integer."""
-     if not features: return None
-     count = features.get("TotalInsts")
-     if isinstance(count, int): return count
-     # Add more flexible checks if TotalInsts might be string etc.
-     try: return int(count)
-     except (ValueError, TypeError): return None
 
 # --- Main SFT Data Generation Function ---
 
@@ -491,8 +267,6 @@ def main():
                         help='Maximum number of samples to process')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed for data splitting')
-    parser.add_argument('--use_rag', action='store_true',
-                        help='Use RAG-based approach for generating SFT data')
     parser.add_argument('--top_k', type=int, default=3,
                         help='Number of sequences to retrieve in RAG approach')
     parser.add_argument('--verbose', action='store_true',
@@ -533,21 +307,9 @@ def main():
     
     print(f"Loaded {len(df)} samples")
     
-    # 如果启用了RAG，预先初始化RAG工具以避免重复初始化
-    rag_tool = None
-    if args.use_rag:
-        print("Initializing RAG search tool...")
-        try:
-            from agent_r1.tool.tools.comiler_autotuning.rag_search_tool import RAGSearchTool
-            rag_tool = RAGSearchTool()
-            print("RAG search tool initialized successfully.")
-        except Exception as e:
-            print(f"Warning: Failed to initialize RAG search tool: {e}")
-            print("Will use fallback method for RAG-based SFT generation.")
-    
     # 处理数据帧
     data_records = []
-    print(f"Processing data with {'RAG-based' if args.use_rag else 'simple'} approach...")
+    print(f"Processing data with simple approach...")
     
     for idx, row in tqdm(df.iterrows(), total=len(df), desc="Processing data"):
         # 提取文件名
