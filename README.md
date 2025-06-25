@@ -2,6 +2,7 @@
 
 **Compiler-R1** is the **first framework** that combines **Large Language Models (LLMs)** and **Reinforcement Learning (RL)** for compiler pass sequence auto-tuning targeting reducing LLVM IR instruction count. It leverages the reasoning ability of LLMs and the exploration power of RL to efficiently discover high-performance pass sequences.
 
+![Compiler-R1 Overview](Compiler-R1.png)
 ---
 
 ## 🌟 Key Features
@@ -93,3 +94,21 @@ bash infer_xxxx.sh
 ```
 
 ⚠️ **Important**: Make sure to correctly set paths inside each inference script (`infer_xxxx.sh`) to point to your trained models and data.
+
+## Citation
+If you use Compiler-R1 in your research or find it useful, please cite our paper:
+
+```bash
+@misc{pan2025compilerr1agenticcompilerautotuning,
+  title={Compiler-R1: Towards Agentic Compiler Auto-tuning with Reinforcement Learning}, 
+  author={Haolin Pan and Hongyu Lin and Haoran Luo and Yang Liu and Kaichun Yao and Libo Zhang and Mingjie Xing and Yanjun Wu},
+  year={2025},
+  eprint={2506.15701},
+  archivePrefix={arXiv},
+  primaryClass={cs.LG},
+  url={https://arxiv.org/abs/2506.15701}
+}
+```
+
+## Acknowledgements
+This repo benefits from [Agent-R1](https://github.com/0russwest0/Agent-R1). Thanks for their wonderful works.
