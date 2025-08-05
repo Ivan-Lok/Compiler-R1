@@ -7,3 +7,6 @@ checkpoint*/
 .history/
 envs/
 llvmir_datasets/
+dataset/cold_start/
+model_save/cold_start_model/
+dataset/rl/

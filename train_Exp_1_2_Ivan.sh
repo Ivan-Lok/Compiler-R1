@@ -3,7 +3,14 @@ export HYDRA_FULL_ERROR=1
 export CUDA_LAUNCH_BLOCKING=1
 export CUDA_VISIBLE_DEVICES=0
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
-export TORCH_CUDA_ARCH_LIST="8.0;8.6"
+export TORCH_CUDA_ARCH_LIST="8.9;8.6;8.0"
+export VLLM_USE_TRITON_FLASH_ATTN=0
+export VLLM_USE_CUSTOM_LAYERNORM=0
+export VLLM_USE_CUSTOM_ROTARY_EMB=0
+export VLLM_USE_CUSTOM_ATTENTION=0
+export VLLM_DISABLE_CUSTOM_ALL_REDUCE=1
+export VLLM_USE_FLASH_ATTN_2_BY_DEFAULT=0
+export VLLM_DISABLE_CUSTOM_OPS=1
 
 # Default parameters
 nproc_per_node=1
@@ -244,23 +251,22 @@ python3 -m agent_r1.src.main_agent \
   actor_rollout_ref.actor.kl_loss_coef=0.001 \
   actor_rollout_ref.actor.kl_loss_type=low_var_kl \
   +actor_rollout_ref.actor.fsdp_config.model_dtype=bfloat16 \
-  actor_rollout_ref.actor.fsdp_config.param_offload=true \
+  actor_rollout_ref.actor.fsdp_config.param_offload=false \
   actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
   \
-  actor_rollout_ref.rollout.name=vllm \
+  actor_rollout_ref.rollout.name=hf \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-  actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
   actor_rollout_ref.rollout.n_repeat=3 \
   actor_rollout_ref.rollout.dtype=bfloat16 \
   \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
-  actor_rollout_ref.ref.fsdp_config.param_offload=true \
+  actor_rollout_ref.ref.fsdp_config.param_offload=false \
   \
   algorithm.kl_ctrl.kl_coef=0.001 \
   \
   trainer.critic_warmup=0 \
-  "trainer.logger=[console,wandb]" \
+  "trainer.logger=[console]" \
   trainer.project_name=$project_name \
   trainer.experiment_name=$grpo_experiment_name \
   trainer.n_gpus_per_node=1 \

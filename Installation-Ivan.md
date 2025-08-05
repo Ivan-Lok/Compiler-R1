@@ -60,3 +60,124 @@ Please ensure you have correctly set the `CUDA_VISIBLE_DEVICES` environment vari
 - **DialoGPT-small**: An even smaller model option in `train_Exp_1_2_DialoGPT-small.sh`, ideal for systems with limited GPU memory
 
 You can change the model by modifying the `base_model` parameter in the respective script or by using the `--model` command line argument.
+
+## Script and Modifications
+
+### Overview of Ivan Training Scripts
+
+During the development and testing process, several optimized training scripts were created to address hardware compatibility issues and improve training stability. This section documents all the modifications made to create the Ivan-specific training scripts.
+
+### Scripts Created
+
+1. **`train_Exp_1_2_Ivan.sh`** - Single GPU optimized with HuggingFace rollout backend for maximum compatibility
+
+### Key Modifications Made
+
+#### 1. CUDA Architecture Compatibility
+**Problem**: Original script didn't specify CUDA architecture for RTX 5880 Ada GPUs
+**Solution**: Added explicit CUDA architecture support
+```bash
+export TORCH_CUDA_ARCH_LIST="8.9;8.6;8.0"
+```
+
+#### 2. VLLM Custom Kernel Issues
+**Problem**: VLLM custom CUDA kernels (rms_norm, attention) failed on RTX 5880 architecture
+**Solution**: Disabled all problematic VLLM custom operations
+```bash
+export VLLM_USE_CUSTOM_LAYERNORM=0
+export VLLM_USE_CUSTOM_ROTARY_EMB=0
+export VLLM_USE_CUSTOM_ATTENTION=0
+export VLLM_DISABLE_CUSTOM_ALL_REDUCE=1
+export VLLM_USE_FLASH_ATTN_2_BY_DEFAULT=0
+export VLLM_DISABLE_CUSTOM_OPS=1
+```
+
+#### 3. Rollout Backend Switch
+**Problem**: VLLM rollout backend had persistent CUDA kernel compatibility issues
+**Solution**: Switched from VLLM to HuggingFace rollout backend
+```bash
+# Changed from:
+actor_rollout_ref.rollout.name=vllm
+
+# To:
+actor_rollout_ref.rollout.name=hf
+```
+
+#### 4. Tensor Parallelism Configuration
+**Problem**: Default tensor_model_parallel_size=2 conflicted with single GPU setup (world_size=1)
+**Solution**: Explicitly set tensor parallelism for single GPU
+```bash
+actor_rollout_ref.rollout.tensor_model_parallel_size=1
+```
+
+#### 5. FSDP Memory Management
+**Problem**: Parameter offloading to CPU caused device placement errors with HuggingFace rollout
+**Solution**: Adjusted FSDP configuration for better compatibility
+```bash
+# Actor configuration
+actor_rollout_ref.actor.fsdp_config.param_offload=false
+actor_rollout_ref.actor.fsdp_config.optimizer_offload=true
+
+# Reference model configuration  
+actor_rollout_ref.ref.fsdp_config.param_offload=false
+```
+
+#### 6. Logging Configuration
+**Problem**: Weights & Biases (wandb) required API key configuration
+**Solution**: Simplified to console-only logging for easier setup
+```bash
+# Changed from:
+"trainer.logger=[console,wandb]"
+
+# To:
+"trainer.logger=[console]"
+```
+
+#### 7. Memory Optimization Settings
+**Problem**: Conservative memory settings for stability on various hardware
+**Solution**: Added comprehensive memory management
+```bash
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+export CUDA_LAUNCH_BLOCKING=1
+```
+
+#### 8. Hardware-Specific Optimizations
+
+**Single GPU Version (`train_Exp_1_2_Ivan.sh`)**:
+- Conservative batch sizes (train_batch_size=16)
+- CPU offloading for optimizer states
+- Single tensor parallel process
+- HuggingFace rollout for maximum compatibility
+
+### Troubleshooting Solutions Implemented
+
+#### Error Resolution Timeline:
+1. **Transformers Version Incompatibility**: Fixed by disabling Ulysses sequence parallel
+2. **VLLM RMS Norm Kernel Failure**: Resolved by disabling custom kernels
+3. **Tensor Parallelism Mismatch**: Fixed by explicit single GPU configuration  
+4. **Wandb Authentication Error**: Solved by switching to console logging
+5. **FSDP Parameter Placement**: Resolved by disabling parameter offloading
+6. **Hydra Configuration Syntax**: Fixed parameter override syntax issues
+
+### Recommended Usage
+
+**Primary Script**: Use `train_Exp_1_2_Ivan.sh`
+- Most stable and compatible
+- Works on single GPU setups
+- Conservative memory usage
+- HuggingFace rollout backend for maximum compatibility
+- Optimized for RTX 5880 and similar modern GPUs
+
+### Environment Variables Summary
+
+The Ivan script includes these stability-focused environment variables:
+```bash
+export VLLM_ATTENTION_BACKEND=XFORMERS
+export HYDRA_FULL_ERROR=1
+export CUDA_LAUNCH_BLOCKING=1
+export CUDA_VISIBLE_DEVICES=0
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128
+export TORCH_CUDA_ARCH_LIST="8.9;8.6;8.0"
+```
+
+These modifications ensure reliable training across different hardware configurations while maintaining the original functionality of the compiler optimization training pipeline.
