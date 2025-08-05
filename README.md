@@ -1,5 +1,7 @@
 # Compiler-R1
 
+Please refer to the [Installation.md](Installation-Ivan.md) for an step by step tutorial on installation.
+
 **Compiler-R1** is the **first framework** that combines **Large Language Models (LLMs)** and **Reinforcement Learning (RL)** for compiler pass sequence auto-tuning targeting reducing LLVM IR instruction count. It leverages the reasoning ability of LLMs and the exploration power of RL to efficiently discover high-performance pass sequences.
 
 ![Compiler-R1 Overview](Compiler-R1.png)
